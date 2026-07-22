@@ -1,99 +1,224 @@
 package com.oriondb.model;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 /**
- * Represents a chess game with metadata (tags) and moves.
- * Immutable after construction.
+ * A chess game: PGN tags plus a move tree.
+ *
+ * The id is assigned by the database (-1 for games not yet in one). Tags keep
+ * insertion order. The move tree preserves variations, comments, and NAGs.
  */
-public class Game {
-    private final int id;
-    private final Map<String, String> tags;
-    private final List<Move> moves;
-    
-    public Game(int id, Map<String, String> tags, List<Move> moves) {
-        this.id = id;
-        this.tags = Collections.unmodifiableMap(new HashMap<>(tags));
-        this.moves = Collections.unmodifiableList(new ArrayList<>(moves));
+public final class Game {
+    public static final String UNKNOWN_DATE = "????.??.??";
+
+    private int id;
+    private final LinkedHashMap<String, String> tags;
+    private MoveNode root;              // first mainline move, or null
+    private String gameComment;         // comment before the first move
+
+    public Game() {
+        this.id = -1;
+        this.tags = new LinkedHashMap<>();
     }
-    
-    public int getId() {
+
+    public Game(Map<String, String> tags, MoveNode root) {
+        this.id = -1;
+        this.tags = new LinkedHashMap<>(tags);
+        this.root = root;
+    }
+
+    // ------------------------------------------------------------------
+    // Identity
+    // ------------------------------------------------------------------
+
+    public int id() {
         return id;
     }
-    
-    public Map<String, String> getTags() {
-        return tags;
+
+    /** Assigned by the database layer. */
+    public void setId(int id) {
+        this.id = id;
     }
-    
-    public String getTag(String key) {
+
+    // ------------------------------------------------------------------
+    // Tags
+    // ------------------------------------------------------------------
+
+    public Map<String, String> tags() {
+        return Collections.unmodifiableMap(tags);
+    }
+
+    public String tag(String key) {
         return tags.get(key);
     }
-    
-    public String getTag(String key, String defaultValue) {
+
+    public String tag(String key, String defaultValue) {
         return tags.getOrDefault(key, defaultValue);
     }
-    
-    public List<Move> getMoves() {
-        return moves;
+
+    public void setTag(String key, String value) {
+        if (value == null) {
+            tags.remove(key);
+        } else {
+            tags.put(key, value);
+        }
     }
-    
-    // Convenience methods for Seven Tag Roster
-    public String getEvent() {
-        return getTag("Event", "?");
+
+    public String white() {
+        return tag("White", "?");
     }
-    
-    public String getSite() {
-        return getTag("Site", "?");
+
+    public String black() {
+        return tag("Black", "?");
     }
-    
-    public String getDate() {
-        return getTag("Date", "????.??.??");
+
+    public String event() {
+        return tag("Event", "?");
     }
-    
-    public String getRound() {
-        return getTag("Round", "?");
+
+    public String site() {
+        return tag("Site", "?");
     }
-    
-    public String getWhite() {
-        return getTag("White", "?");
+
+    public String date() {
+        return tag("Date", UNKNOWN_DATE);
     }
-    
-    public String getBlack() {
-        return getTag("Black", "?");
+
+    public String round() {
+        return tag("Round", "?");
     }
-    
-    public String getResult() {
-        return getTag("Result", "*");
+
+    public String result() {
+        return tag("Result", "*");
     }
-    
-    public Integer getWhiteElo() {
-        String elo = getTag("WhiteElo");
-        return elo != null && !elo.equals("?") ? Integer.parseInt(elo) : null;
+
+    public String eco() {
+        return tag("ECO");
     }
-    
-    public Integer getBlackElo() {
-        String elo = getTag("BlackElo");
-        return elo != null && !elo.equals("?") ? Integer.parseInt(elo) : null;
+
+    public String opening() {
+        return tag("Opening");
     }
-    
-    public String getEco() {
-        return getTag("ECO");
+
+    public Integer whiteElo() {
+        return parseElo(tag("WhiteElo"));
     }
-    
+
+    public Integer blackElo() {
+        return parseElo(tag("BlackElo"));
+    }
+
+    /** Average of the Elos present; null when neither player has one. */
+    public Integer averageElo() {
+        Integer w = whiteElo();
+        Integer b = blackElo();
+        if (w == null) return b;
+        if (b == null) return w;
+        return (w + b) / 2;
+    }
+
+    private static Integer parseElo(String elo) {
+        if (elo == null || elo.isEmpty() || elo.equals("?") || elo.equals("-")) return null;
+        try {
+            int value = Integer.parseInt(elo.trim());
+            return value > 0 ? value : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Date in a form that compares correctly as a string: unknown components
+     * are zero-filled ("1985.??.??" -&gt; "1985.00.00"). Returns null when the
+     * year is unknown.
+     */
+    public String sortableDate() {
+        String date = date();
+        if (date.length() < 4) return null;
+        String year = date.substring(0, 4);
+        if (!year.chars().allMatch(Character::isDigit)) return null;
+        String month = date.length() >= 7 ? date.substring(5, 7) : "00";
+        String day = date.length() >= 10 ? date.substring(8, 10) : "00";
+        if (!month.chars().allMatch(Character::isDigit)) month = "00";
+        if (!day.chars().allMatch(Character::isDigit)) day = "00";
+        return year + "." + month + "." + day;
+    }
+
+    // ------------------------------------------------------------------
+    // Moves
+    // ------------------------------------------------------------------
+
+    /** First mainline move, or null for a game without moves. */
+    public MoveNode root() {
+        return root;
+    }
+
+    public void setRoot(MoveNode root) {
+        this.root = root;
+    }
+
+    /** Comment before the first move, or null. */
+    public String gameComment() {
+        return gameComment;
+    }
+
+    public void setGameComment(String comment) {
+        this.gameComment = comment;
+    }
+
+    /** Mainline moves as SAN strings. */
+    public List<String> mainlineSans() {
+        List<String> sans = new ArrayList<>();
+        for (MoveNode node = root; node != null; node = node.next()) {
+            sans.add(node.san());
+        }
+        return sans;
+    }
+
+    /** Number of mainline plies. */
+    public int plyCount() {
+        int count = 0;
+        for (MoveNode node = root; node != null; node = node.next()) {
+            count++;
+        }
+        return count;
+    }
+
+    /** True if any node in the tree has a comment, NAG, or variation. */
+    public boolean hasAnnotations() {
+        if (gameComment != null) return true;
+        return hasAnnotations(root);
+    }
+
+    private static boolean hasAnnotations(MoveNode node) {
+        for (; node != null; node = node.next()) {
+            if (node.hasAnnotations()) return true;
+            for (MoveNode variation : node.variations()) {
+                if (hasAnnotations(variation)) return true;
+            }
+        }
+        return false;
+    }
+
     @Override
     public String toString() {
-        return String.format("Game #%d: %s vs %s (%s) - %s", 
-            id, getWhite(), getBlack(), getDate(), getResult());
+        return String.format("%s vs %s, %s (%s) %s",
+            white(), black(), event(), date(), result());
     }
-    
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        Game game = (Game) o;
-        return id == game.id;
+        if (!(o instanceof Game)) return false;
+        Game other = (Game) o;
+        return id != -1 && id == other.id;
     }
-    
+
     @Override
     public int hashCode() {
         return Objects.hash(id);
