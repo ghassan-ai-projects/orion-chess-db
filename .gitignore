@@ -59,8 +59,6 @@ build/
 # macOS
 .DS_Store
 
-# Database files (for testing)
-*.oriondb
-*.oriondb.idx
+# Local database files (a database is a plain .pgn file)
 *.pgn
-!examples/sample.pgn
+!examples/famous-games.pgn

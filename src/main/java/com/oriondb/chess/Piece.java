@@ -1,99 +1,107 @@
 package com.oriondb.chess;
 
 /**
- * Represents chess pieces.
- * Uses integer encoding: 0-5 for white pieces, 8-13 for black pieces.
+ * Piece encoding: types 0-5 (P,N,B,R,Q,K), color bit 8.
+ * White pieces are 0-5, black pieces are 8-13, empty is NONE (-1).
  */
-public class Piece {
-    // White pieces (0-5)
-    public static final int WHITE_PAWN = 0;
-    public static final int WHITE_KNIGHT = 1;
-    public static final int WHITE_BISHOP = 2;
-    public static final int WHITE_ROOK = 3;
-    public static final int WHITE_QUEEN = 4;
-    public static final int WHITE_KING = 5;
-    
-    // Black pieces (8-13)
-    public static final int BLACK_PAWN = 8;
-    public static final int BLACK_KNIGHT = 9;
-    public static final int BLACK_BISHOP = 10;
-    public static final int BLACK_ROOK = 11;
-    public static final int BLACK_QUEEN = 12;
-    public static final int BLACK_KING = 13;
-    
-    public static final int NONE = -1;
-    
+public final class Piece {
+    public static final int PAWN = 0;
+    public static final int KNIGHT = 1;
+    public static final int BISHOP = 2;
+    public static final int ROOK = 3;
+    public static final int QUEEN = 4;
+    public static final int KING = 5;
+
     public static final int WHITE = 0;
     public static final int BLACK = 8;
-    
-    /**
-     * Get piece type (0-5) from piece value.
-     */
+
+    public static final int WHITE_PAWN = PAWN | WHITE;
+    public static final int WHITE_KNIGHT = KNIGHT | WHITE;
+    public static final int WHITE_BISHOP = BISHOP | WHITE;
+    public static final int WHITE_ROOK = ROOK | WHITE;
+    public static final int WHITE_QUEEN = QUEEN | WHITE;
+    public static final int WHITE_KING = KING | WHITE;
+
+    public static final int BLACK_PAWN = PAWN | BLACK;
+    public static final int BLACK_KNIGHT = KNIGHT | BLACK;
+    public static final int BLACK_BISHOP = BISHOP | BLACK;
+    public static final int BLACK_ROOK = ROOK | BLACK;
+    public static final int BLACK_QUEEN = QUEEN | BLACK;
+    public static final int BLACK_KING = KING | BLACK;
+
+    public static final int NONE = -1;
+
+    private static final char[] TYPE_CHARS = {'P', 'N', 'B', 'R', 'Q', 'K'};
+    private static final String[] TYPE_NAMES = {"Pawn", "Knight", "Bishop", "Rook", "Queen", "King"};
+
+    private Piece() {}
+
+    /** Piece type (0-5) regardless of color. */
     public static int type(int piece) {
         return piece & 7;
     }
-    
-    /**
-     * Get piece color (0 for white, 8 for black).
-     */
+
+    /** Piece color: WHITE (0) or BLACK (8). */
     public static int color(int piece) {
         return piece & 8;
     }
-    
-    /**
-     * Check if piece is white.
-     */
+
     public static boolean isWhite(int piece) {
-        return (piece & 8) == 0;
+        return piece != NONE && (piece & 8) == 0;
     }
-    
-    /**
-     * Check if piece is black.
-     */
+
     public static boolean isBlack(int piece) {
-        return (piece & 8) == 8;
+        return piece != NONE && (piece & 8) == 8;
     }
-    
-    /**
-     * Get piece character for FEN.
-     */
+
+    public static int make(int type, int color) {
+        return type | color;
+    }
+
+    public static int opposite(int color) {
+        return color ^ 8;
+    }
+
+    /** Uppercase letter for white, lowercase for black (FEN convention). */
     public static char toFenChar(int piece) {
-        char[] chars = {'P', 'N', 'B', 'R', 'Q', 'K'};
-        int type = type(piece);
-        if (type < 0 || type > 5) return '?';
-        char c = chars[type];
+        if (piece == NONE) return '.';
+        char c = TYPE_CHARS[type(piece)];
         return isBlack(piece) ? Character.toLowerCase(c) : c;
     }
-    
-    /**
-     * Parse piece from FEN character.
-     */
+
+    /** Parse a FEN piece character; returns NONE for unknown characters. */
     public static int fromFenChar(char c) {
-        switch (c) {
-            case 'P': return WHITE_PAWN;
-            case 'N': return WHITE_KNIGHT;
-            case 'B': return WHITE_BISHOP;
-            case 'R': return WHITE_ROOK;
-            case 'Q': return WHITE_QUEEN;
-            case 'K': return WHITE_KING;
-            case 'p': return BLACK_PAWN;
-            case 'n': return BLACK_KNIGHT;
-            case 'b': return BLACK_BISHOP;
-            case 'r': return BLACK_ROOK;
-            case 'q': return BLACK_QUEEN;
-            case 'k': return BLACK_KING;
+        int color = Character.isLowerCase(c) ? BLACK : WHITE;
+        switch (Character.toUpperCase(c)) {
+            case 'P': return PAWN | color;
+            case 'N': return KNIGHT | color;
+            case 'B': return BISHOP | color;
+            case 'R': return ROOK | color;
+            case 'Q': return QUEEN | color;
+            case 'K': return KING | color;
             default: return NONE;
         }
     }
-    
-    /**
-     * Get piece name.
-     */
-    public static String getName(int piece) {
-        String[] names = {"Pawn", "Knight", "Bishop", "Rook", "Queen", "King"};
-        int type = type(piece);
-        if (type < 0 || type > 5) return "None";
-        String color = isWhite(piece) ? "White" : "Black";
-        return color + " " + names[type];
+
+    /** SAN letter for a piece type: "" for pawns, otherwise N/B/R/Q/K. */
+    public static String sanLetter(int type) {
+        return type == PAWN ? "" : String.valueOf(TYPE_CHARS[type]);
+    }
+
+    /** Parse a SAN piece letter (N/B/R/Q/K) to a type, or -1 if not a piece letter. */
+    public static int typeFromSanLetter(char c) {
+        switch (c) {
+            case 'N': return KNIGHT;
+            case 'B': return BISHOP;
+            case 'R': return ROOK;
+            case 'Q': return QUEEN;
+            case 'K': return KING;
+            default: return -1;
+        }
+    }
+
+    public static String name(int piece) {
+        if (piece == NONE) return "None";
+        return (isWhite(piece) ? "White " : "Black ") + TYPE_NAMES[type(piece)];
     }
 }

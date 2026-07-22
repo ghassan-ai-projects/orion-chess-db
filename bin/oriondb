@@ -1,0 +1,33 @@
+#!/bin/sh
+# OrionDB launcher: finds a working Java 17+ runtime and runs the fat jar.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+JAR="$DIR/target/oriondb.jar"
+
+if [ ! -f "$JAR" ]; then
+    echo "oriondb: jar not built yet — run: mvn -q package" >&2
+    exit 1
+fi
+
+# Candidates in order; macOS ships a /usr/bin/java stub that fails when no
+# JDK is registered, so each candidate is verified before use.
+try_java() {
+    [ -n "$1" ] && "$1" -version >/dev/null 2>&1
+}
+
+JAVA=""
+if [ -n "$JAVA_HOME" ] && try_java "$JAVA_HOME/bin/java"; then
+    JAVA="$JAVA_HOME/bin/java"
+elif try_java /opt/homebrew/opt/openjdk/bin/java; then
+    JAVA=/opt/homebrew/opt/openjdk/bin/java
+elif try_java /usr/local/opt/openjdk/bin/java; then
+    JAVA=/usr/local/opt/openjdk/bin/java
+elif command -v java >/dev/null 2>&1 && try_java "$(command -v java)"; then
+    JAVA=java
+fi
+
+if [ -z "$JAVA" ]; then
+    echo "oriondb: no working Java runtime found (need Java 17+)" >&2
+    exit 1
+fi
+
+exec "$JAVA" -jar "$JAR" "$@"
