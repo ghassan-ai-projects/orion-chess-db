@@ -15,11 +15,11 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class DatabaseTest {
+public class DatabaseTest {
 
     /** The Opera Game, a Najdorf, an Italian, a scholar's mate, a Lucena
      *  bridge (FEN game), and an underpromotion fork (FEN game). */
-    static final String FIXTURE = """
+    public static final String FIXTURE = """
         [Event "Paris Opera"]
         [Site "Paris FRA"]
         [Date "1858.11.02"]

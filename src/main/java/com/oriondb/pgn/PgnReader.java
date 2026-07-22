@@ -7,6 +7,9 @@ import com.oriondb.model.MoveNode;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -60,7 +63,30 @@ public final class PgnReader {
     }
 
     public ParseResult readFile(Path path) throws IOException {
-        return readString(Files.readString(path, StandardCharsets.UTF_8));
+        return readString(readFileText(path));
+    }
+
+    /**
+     * Read a PGN file as text: UTF-8 when valid, otherwise Latin-1
+     * (the historical PGN encoding, common in older collections).
+     * A UTF-8 BOM is stripped.
+     */
+    public static String readFileText(Path path) throws IOException {
+        byte[] bytes = Files.readAllBytes(path);
+        String text;
+        try {
+            text = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString();
+        } catch (CharacterCodingException e) {
+            text = new String(bytes, StandardCharsets.ISO_8859_1);
+        }
+        if (!text.isEmpty() && text.charAt(0) == '﻿') {
+            text = text.substring(1);
+        }
+        return text;
     }
 
     public ParseResult read(Reader reader) throws IOException {

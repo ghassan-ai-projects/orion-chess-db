@@ -1,301 +1,222 @@
-# OrionDB Chess Database Engine
+# OrionDB — a chess database with a built-in MCP server
 
-**OrionDB** is a high-performance, open-source chess database engine written in Java. It is designed for developers who need to build applications with rich, fast search functionality over large collections of chess games.
+OrionDB is a chess database engine for personal collections: a few hundred to
+a few tens of thousands of games, with the search depth of a professional
+database and a **built-in [MCP](https://modelcontextprotocol.io) server** so AI
+agents (Claude Code, Claude Desktop, or any MCP client) can query and edit your
+games directly.
 
-Unlike traditional chess applications, OrionDB is a library, not a GUI. It provides a powerful, developer-centric API to create, manage, and query chess databases programmatically.
+**Your database file is plain PGN.** Every chess program can open it; OrionDB
+adds validation, indexing, and search on top. No proprietary format, no lock-in,
+nothing to migrate.
 
-## Key Features (Phase 0 & 1)
+```
+┌─────────────────────────────────────────────────────────┐
+│                      oriondb.jar                        │
+│                                                         │
+│  CLI (humans)                    MCP server (agents)    │
+│  search / explorer / player      13 tools over stdio    │
+│        └──────────────┬──────────────┘                  │
+│                  Search engine                          │
+│   metadata · positions · material · tactics · text      │
+│                       │                                 │
+│               In-memory database                        │
+│   Zobrist position index · ECO book · player stats      │
+│                       │                                 │
+│              Legal-move chess core                      │
+│   perft-validated movegen · SAN · FEN · lossless PGN    │
+└─────────────────────────────────────────────────────────┘
+                          │
+                    your-games.pgn
+```
 
-- **High-Performance PGN Parsing**: A fast, error-tolerant parser that can import millions of games from standard PGN files.
-- **Optimized Binary Format**: A custom `.oriondb` binary format for compact storage and extremely fast read operations.
-- **Rich Metadata Indexing**: Multi-layered indexes for all standard PGN tags, including player, event, ECO, date, Elo, and result.
-- **Fluent Query API**: A clean, chainable, and type-safe API for building complex search queries.
+## Highlights
 
-## Phase 2 & 3 Features (New!)
+- **Correct chess.** Full legal move generation (pins, checks, castling
+  legality, en passant), validated by perft against reference positions.
+  Every imported move is replayed and normalized; illegal games are flagged,
+  never silently corrupted.
+- **Lossless PGN.** Variations, comments, NAGs, `%` escape lines, glued move
+  numbers, `0-0` castling, Latin-1 legacy files, FEN set-up games — read,
+  preserved, and written back in clean export format.
+- **Transposition-aware position search.** Zobrist hashing means "find games
+  reaching this position" works regardless of move order.
+- **Opening explorer.** For any position: every continuation with game counts,
+  W/D/L, score for the side to move, average Elo of the movers, last-played
+  date, and sample games — like the big commercial databases.
+- **ECO auto-classification.** The lichess opening book (3,800+ named lines,
+  CC0) is embedded. Games missing ECO/Opening tags get them filled in on
+  import, transposition-aware.
+- **Tactics search.** Forks, pins, skewers, discovered/double checks,
+  promotions, underpromotions, en passant captures, checkmates — detected on
+  import, searchable instantly, listed per game.
+- **Endgame search.** By material signature ("KRP vs KR") or piece count
+  ("positions with ≤ 6 pieces").
+- **Player intelligence.** Dossiers (W/D/L by color, performance rating,
+  repertoire with scores, best wins) and head-to-head reports.
+- **Duplicate detection**, comment full-text search, pawn-structure filters
+  (IQP, passed pawns, ...), date/Elo/event/result filters, sorting, pagination.
+- **Zero-infrastructure.** One 500 KB jar, one PGN file. Atomic saves.
+  12,500 real master games import in ~7 s and reopen in ~6 s on a laptop;
+  a 3,000-game personal collection feels instant.
 
-- **Position & Structure Search**:
-  - **Zobrist Hashing**: For efficient position identification.
-  - **FEN Search**: Find games by exact board position.
-  - **Material Indexing**: Search by material balance and imbalance.
-  - **Pawn Structure Classification**: Identify and search for common pawn structures (IQP, Maroczy Bind, etc.).
+## Quick start
 
-- **CQL & Annotation Search**:
-  - **Chess Query Language (CQL)**: A powerful single-string query interface.
-  - **Full-Text Search**: On game commentary using a simplified index (full Lucene integration planned).
+Requires Java 17+ (build with Maven).
 
-- **Minimal Dependencies**: Built with the Java 11+ standard library, with Apache Lucene for full-text search.
-- **Open Source**: Licensed under the MIT License.
+```bash
+mvn -q package
+```
 
-- **High-Performance PGN Parsing**: A fast, error-tolerant parser that can import millions of games from standard PGN files.
-- **Optimized Binary Format**: A custom `.oriondb` binary format for compact storage and extremely fast read operations.
-- **Rich Metadata Indexing**: Multi-layered indexes for all standard PGN tags, including player, event, ECO, date, Elo, and result.
-- **Fluent Query API**: A clean, chainable, and type-safe API for building complex search queries.
-- **Minimal Dependencies**: Built with the Java 11+ standard library, with no external runtime dependencies.
-- **Open Source**: Licensed under the MIT License.
+Everything runs through the launcher (or `java -jar target/oriondb.jar ...`):
 
-## Getting Started
+```bash
+# Create a database by importing PGN into it
+./bin/oriondb import mygames.pgn some-collection.pgn
 
-### Prerequisites
+# Overview
+./bin/oriondb stats mygames.pgn
 
-- Java 11 or higher
-- Apache Maven (for building)
+# Search
+./bin/oriondb search mygames.pgn --player Carlsen --eco B90 --result white --limit 10
+./bin/oriondb search mygames.pgn --material "KRP vs KR" --max-pieces 6
+./bin/oriondb search mygames.pgn --motif underpromotion
+./bin/oriondb search mygames.pgn --opening-line "1. e4 c5 2. Nf3 d6" --min-elo 2700
 
-### Building from Source
+# Opening explorer from any position
+./bin/oriondb explorer mygames.pgn "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6"
 
-1.  **Clone the repository:**
+# One game with its tactical moments
+./bin/oriondb game mygames.pgn 17
 
-    ```bash
-    git clone https://github.com/your-username/oriondb.git
-    cd oriondb
-    ```
+# Players
+./bin/oriondb player mygames.pgn "Kasparov"
+./bin/oriondb h2h mygames.pgn "Kasparov" "Karpov"
 
-2.  **Build with Maven:**
+# Maintenance
+./bin/oriondb dedupe mygames.pgn
+./bin/oriondb export mygames.pgn --ids 1,5,9 -o best.pgn
+```
 
-    ```bash
-    mvn clean install
-    ```
+## The MCP server (for AI agents)
 
-    This will compile the project and create a JAR file in the `target/` directory.
+The MCP server is built into the same jar — not a wrapper, not a separate
+process to manage. It speaks MCP over stdio:
 
-## Usage
+```bash
+./bin/oriondb mcp mygames.pgn
+```
 
-### 1. Creating a Database
+### Claude Code
 
-First, you need to create a database from a PGN file. OrionDB will parse the PGN, write the games to its optimized binary format, and create an index file.
+This repository ships a [.mcp.json](.mcp.json) pointing at the sample
+database; edit the path to your own PGN. Or register it anywhere with:
 
-```java
-import com.oriondb.core.OrionDatabase;
-import com.oriondb.util.ProgressCallback;
-import java.io.File;
+```bash
+claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygames.pgn
+```
 
-public class CreateDatabase {
-    public static void main(String[] args) throws Exception {
-        File pgnFile = new File("path/to/your/games.pgn");
-        File dbFile = new File("path/to/your/games.oriondb");
+### Claude Desktop
 
-        System.out.println("Creating database...");
-
-        OrionDatabase.ImportStats stats = OrionDatabase.createFromPgn(
-            pgnFile, 
-            dbFile, 
-            ProgressCallback.CONSOLE // Reports progress to the console
-        );
-
-        System.out.println("\nDatabase created successfully!");
-        System.out.println(stats);
+```json
+{
+  "mcpServers": {
+    "oriondb": {
+      "command": "/path/to/orion-chess-db/bin/oriondb",
+      "args": ["mcp", "/path/to/mygames.pgn"]
     }
+  }
 }
 ```
 
-### 2. Loading and Querying a Database (Fluent API)
+### Tools
 
-Once the database is created, you can load it and perform queries using the fluent `SearchBuilder` API.
+| Tool | What it does |
+|---|---|
+| `db_stats` | Game count, players, date range, top openings |
+| `search_games` | Every filter below, AND-combined, with sort + pagination |
+| `get_game` | Full game: tags, moves, PGN, final FEN, tactical moments |
+| `opening_explorer` | Move statistics tree for any position |
+| `position_search` | Games reaching a FEN position (+ where and what came next) |
+| `player_report` | Dossier: W/D/L, performance, repertoire, best wins |
+| `head_to_head` | Two players' lifetime score, split by color |
+| `import_pgn` | Import text or a file; validates, dedupes, classifies |
+| `add_game` | Add a single game, returns its id |
+| `delete_game` | Remove a game |
+| `set_tag` | Edit or remove a PGN tag |
+| `export_pgn` | Export by ids or everything, to text or file |
+| `find_duplicates` | Groups of games with identical moves |
+
+Mutations save to disk automatically (atomic temp-file + rename).
+
+`search_games` filters: `white`, `black`, `player`, `event`, `site`, `eco`
+(exact / prefix / range), `opening`, `result`, `date_from`, `date_to`,
+`min_elo`, `max_elo`, `elo_mode` (either/both/average), `min_ply`, `max_ply`,
+`opening_line`, `contains_fen`, `material`, `max_pieces`, `motif`,
+`pawn_feature`, `comment_contains`, `annotated`, `sort_by`, `descending`,
+`limit`, `offset`.
+
+## Library use
 
 ```java
-import com.oriondb.core.OrionDatabase;
-import com.oriondb.model.Game;
-import java.io.File;
-import java.util.List;
+try (Database db = Database.open(Path.of("mygames.pgn"))) {
+    // Fluent search
+    List<Game> games = db.search()
+        .player("Carlsen").eco("B90-B99")
+        .minElo(2700, Search.EloMode.BOTH)
+        .sortBy(Search.Sort.DATE, true).limit(20)
+        .find();
 
-public class QueryDatabase {
-    public static void main(String[] args) throws Exception {
-        File dbFile = new File("path/to/your/games.oriondb");
-
-        try (OrionDatabase db = OrionDatabase.load(dbFile)) {
-            System.out.println("Database loaded with " + db.getGameCount() + " games.");
-
-            // Example 1: Find all games by Magnus Carlsen where he won
-            List<Game> carlsenWins = db.search()
-                .withPlayer("Carlsen, Magnus")
-                .withResult("1-0")
-                .execute();
-
-            System.out.println("Found " + carlsenWins.size() + " wins by Carlsen.");
-
-            // Example 2: Find all Sicilian Najdorf games by players rated over 2700
-            List<Game> najdorfGames = db.search()
-                .withEco("B90")
-                .withEloRange(2700, 3000)
-                .execute();
-
-            System.out.println("Found " + najdorfGames.size() + " high-level Najdorf games.");
-
-            // Example 3: Count games without loading them (more efficient)
-            int karpovGamesCount = db.search()
-                .withPlayer("Karpov, Anatoly")
-                .count();
-
-            System.out.println("Anatoly Karpov played in " + karpovGamesCount + " games in this database.");
-        }
-    }
+    // Opening explorer
+    OpeningExplorer.Result tree = db.explorer().explore("1. e4 c5 2. Nf3");
+    // Player dossier
+    PlayerStats.Report report = db.players().report("Kasparov");
+    // Tactics of one game
+    List<Motifs.Moment> moments = Motifs.moments(games.get(0));
 }
 ```
 
-### 3. Querying with Chess Query Language (CQL)
+See [examples/ApiExample.java](examples/ApiExample.java) for a complete
+program, and [examples/famous-games.pgn](examples/famous-games.pgn) for a tiny
+sample database.
 
-For more complex or dynamic queries, you can use the powerful Chess Query Language (CQL) interface.
+## Design notes
 
-```java
-// Example: Find all of Kasparov's wins with the King's Indian Defense in the 1990s
-List<Game> kasparovGames = db.query(
-    "player='Kasparov, Garry' AND eco='E97' AND result='1-0' AND date >= '1990.01.01' AND date <= '1999.12.31'"
-);
+- **PGN is the storage format.** At this scale (thousands of games, not
+  millions) everything fits comfortably in memory: opening a database
+  re-validates and re-indexes it (parallelized across cores), which takes a
+  couple of seconds and guarantees indexes are never stale. Saves are atomic.
+- **The chess core is the foundation.** SAN disambiguation legally requires
+  pin-aware move generation (`Re2` when one rook is pinned), so the engine
+  implements full legality and is perft-validated. Zobrist hashes use the
+  polyglot en-passant convention so transpositions that differ only in an
+  irrelevant e.p. square identify.
+- **Variations are first-class.** The move tree preserves RAVs, comments, and
+  NAGs through import/export round trips. Mainline positions are indexed;
+  variations are kept and searchable by text.
+- **Dependencies:** Gson (for the MCP JSON layer). That's it.
 
-// Example: Find games with a specific commentary note
-List<Game> noveltyGames = db.query("commentary CONTAINS 'novelty'");
+## Project layout
+
+```
+src/main/java/com/oriondb/
+  chess/      Board, legal movegen, SAN, FEN, Zobrist
+  model/      Game, MoveNode (move tree), replay helpers
+  pgn/        PgnReader (tolerant tokenizer), PgnWriter
+  eco/        EcoClassifier + embedded openings book (CC0)
+  analysis/   Material signatures, pawn features, tactical motifs
+  db/         Database (PGN persistence, indexes), GameData
+  search/     Search, OpeningExplorer, PlayerStats, Duplicates
+  mcp/        McpServer (stdio JSON-RPC), DbTools (13 tools)
+  cli/        Main
 ```
 
-Once the database is created, you can load it and perform queries using the fluent `SearchBuilder` API.
+## Acknowledgements
 
-```java
-import com.oriondb.core.OrionDatabase;
-import com.oriondb.model.Game;
-import java.io.File;
-import java.util.List;
-
-public class QueryDatabase {
-    public static void main(String[] args) throws Exception {
-        File dbFile = new File("path/to/your/games.oriondb");
-
-        try (OrionDatabase db = OrionDatabase.load(dbFile)) {
-            System.out.println("Database loaded with " + db.getGameCount() + " games.");
-
-            // Example 1: Find all games by Magnus Carlsen where he won
-            List<Game> carlsenWins = db.search()
-                .withPlayer("Carlsen, Magnus")
-                .withResult("1-0")
-                .execute();
-
-            System.out.println("Found " + carlsenWins.size() + " wins by Carlsen.");
-
-            // Example 2: Find all Sicilian Najdorf games by players rated over 2700
-            List<Game> najdorfGames = db.search()
-                .withEco("B90")
-                .withEloRange(2700, 3000)
-                .execute();
-
-            System.out.println("Found " + najdorfGames.size() + " high-level Najdorf games.");
-
-            // Example 3: Count games without loading them (more efficient)
-            int karpovGamesCount = db.search()
-                .withPlayer("Karpov, Anatoly")
-                .count();
-
-            System.out.println("Anatoly Karpov played in " + karpovGamesCount + " games in this database.");
-        }
-    }
-}
-```
-
-## Architecture
-
-OrionDB is built with a layered architecture to separate concerns and allow for future expansion.
-
--   **Data Layer**: Manages the custom binary file format (`.oriondb`) and index file (`.oriondb.idx`).
--   **Parsing Layer**: Contains the high-performance, error-tolerant PGN parser.
--   **Domain Layer**: Defines the core data models like `Game` and `Move`.
--   **Index Layer**: Manages in-memory indexes for fast metadata lookups.
--   **Query Layer**: Provides the fluent `SearchBuilder` API and executes queries against the indexes.
--   **API Layer**: The public-facing `OrionDatabase` class that ties everything together.
-
-## Advanced Features
-
-### Full-Text Search with Apache Lucene
-
-OrionDB now integrates Apache Lucene for powerful full-text search on game commentary and annotations. This enables:
-
-- **Fuzzy Search**: Find terms with typos (e.g., `novelty~2`)
-- **Phrase Search**: Find exact phrases (e.g., `"theoretical novelty"`)
-- **Boolean Logic**: Combine terms with AND, OR, NOT
-- **Wildcards**: Use `*` and `?` for flexible matching
-- **Field-Specific Queries**: Search within comments or annotations (`comment:brilliant`)
-
-### Position Indexing and Search
-
-When enabled, OrionDB will now index every position in every game, allowing you to search by:
-
-- **FEN String**: Find all games that reached a specific position.
-- **Material Balance**: Query for games with a certain material advantage or disadvantage.
-- **Pawn Structure**: Search for common pawn structures like IQP, Maroczy Bind, and more.
-
-### Move-Based Queries
-
-Search for games containing specific moves or move sequences.
-
-- **Single Move Search**: Find all games where a specific move was played (e.g., `move='Nf3'`).
-- **Move Sequence Search**: Find games with an exact sequence of moves (e.g., `moves CONTAINS 'e4 e5 Nf3 Nc6'`).
-- **Move Context**: Combine move searches with other filters like move number or player Elo.
-
-### Tactical Motif Detection
-
-OrionDB can automatically detect common tactical patterns in every position of every game:
-
-- **Pins**
-- **Forks**
-- **Skewers**
-- **Double Attacks**
-
-This allows for powerful tactical analysis across the entire database.
-
-### Extended Chess Query Language (CQL)
-
-CQL has been extended to support these new features:
-
-```java
-// Find games with a specific position
-db.query("fen=\'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 2\'");
-
-// Find games with a specific pawn structure
-db.query("structure=\'IQP\'");
-
-// Find games with commentary containing "brilliant sacrifice"
-db.query("commentary CONTAINS \'brilliant sacrifice\'");
-
-// Find games with a brilliant move annotation
-db.query("annotation=\'!!\'");// Find games where Nf3 was played
-db.query("move='Nf3'");
-
-// Find games with the Ruy Lopez opening sequence
-db.query("moves CONTAINS 'e4 e5 Nf3 Nc6 Bb5'");
-
-// Find games with knight forks
-db.query("motif='fork' AND move LIKE 'N%'");
-
-// Find high-level games with pins
-db.query("motif='pin' AND elo >= 2700");
-```
-
-## Future Roadmap
-
-This version of OrionDB implements the core features of Phases 0, 1, 2, and 3. Future development will focus on refining these features and expanding the ecosystem.
-
--   **Full Lucene Integration**: Enhance the commentary search with the full power of Apache Lucene, including fuzzy search, phrase search, and relevance scoring.
-
--   **Performance Optimization**: Further optimize the position and material indexes for even faster query performance and lower memory usage.
-
--   **Phase 4: Ecosystem**
-    -   Create a standalone server to expose the API via REST/gRPC.
-    -   Develop client libraries for other languages (e.g., Python, Node.js).
-
-This initial version of OrionDB focuses on providing a solid foundation and a powerful metadata search API. Future development will focus on adding even more powerful search capabilities.
-
--   **Phase 2: Position & Structure Search**
-    -   Implement Zobrist hashing for position indexing.
-    -   Add search by FEN (Forsyth-Edwards Notation).
-    -   Implement material balance and pawn structure search.
-
--   **Phase 3: Pro Features**
-    -   Implement a full Chess Query Language (CQL) parser for single-string queries.
-    -   Integrate Apache Lucene for full-text search on game commentary.
-
--   **Phase 4: Ecosystem**
-    -   Create a standalone server to expose the API via REST/gRPC.
-    -   Develop client libraries for other languages (e.g., Python, Node.js).
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a pull request or open an issue.
+- Opening classifications from
+  [lichess-org/chess-openings](https://github.com/lichess-org/chess-openings)
+  (CC0), embedded in `src/main/resources/com/oriondb/eco/openings.tsv`.
 
 ## License
 
-OrionDB is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+MIT — see [LICENSE](LICENSE).

@@ -65,8 +65,7 @@ public final class Database implements AutoCloseable {
     public static Database open(Path pgnPath) throws IOException {
         Database db = new Database(pgnPath);
         if (Files.exists(pgnPath)) {
-            String text = Files.readString(pgnPath, StandardCharsets.UTF_8);
-            db.importPgn(text);
+            db.importPgn(PgnReader.readFileText(pgnPath));
             db.dirty = false; // freshly loaded state matches the file
         }
         return db;
@@ -151,7 +150,10 @@ public final class Database implements AutoCloseable {
      * @throws IllegalArgumentException if the game's mainline does not replay
      */
     public int add(Game game) {
-        GameData gameData = GameData.build(game);
+        return add(game, GameData.build(game));
+    }
+
+    private int add(Game game, GameData gameData) {
         int id = nextId++;
         game.setId(id);
         autoFillOpeningTags(game, gameData);
@@ -164,30 +166,45 @@ public final class Database implements AutoCloseable {
 
     /**
      * Import games from PGN text. Exact duplicates (same players and same
-     * moves) of games already in the database are skipped.
+     * moves) of games already in the database are skipped. Derived data is
+     * computed on all cores.
      */
     public ImportReport importPgn(String pgnText) {
         PgnReader.ParseResult parsed = new PgnReader().readString(pgnText);
         List<String> warnings = new ArrayList<>(parsed.warnings());
+
+        // The replay/analysis work is independent per game: parallelize it,
+        // preserving encounter order, then insert sequentially.
+        record Built(Game game, GameData data, String error) {}
+        List<Built> built = parsed.games().parallelStream()
+            .map(game -> {
+                try {
+                    return new Built(game, GameData.build(game), null);
+                } catch (IllegalArgumentException e) {
+                    return new Built(game, null, e.getMessage());
+                }
+            })
+            .toList();
+
         int added = 0;
         int duplicates = 0;
-        for (Game game : parsed.games()) {
-            if (isDuplicate(game)) {
+        for (Built b : built) {
+            if (b.error() != null) {
+                warnings.add("skipped unreplayable game (" + b.game() + "): " + b.error());
+                continue;
+            }
+            if (isDuplicate(b.game())) {
                 duplicates++;
                 continue;
             }
-            try {
-                add(game);
-                added++;
-            } catch (IllegalArgumentException e) {
-                warnings.add("skipped unreplayable game (" + game + "): " + e.getMessage());
-            }
+            add(b.game(), b.data());
+            added++;
         }
         return new ImportReport(added, duplicates, warnings);
     }
 
     public ImportReport importFile(Path pgnFile) throws IOException {
-        return importPgn(Files.readString(pgnFile, StandardCharsets.UTF_8));
+        return importPgn(PgnReader.readFileText(pgnFile));
     }
 
     /**
