@@ -381,6 +381,36 @@ public final class Search {
         return this;
     }
 
+    /**
+     * Add and remove categorical tags on every game returned by this search.
+     * Sorting, limit, and offset are honored.
+     */
+    public Database.TagUpdateReport updateGameTags(
+            Collection<String> add, Collection<String> remove) {
+        synchronized (db) {
+            List<Integer> ids = find().stream().map(Game::id).toList();
+            return db.updateGameTags(ids, add, remove);
+        }
+    }
+
+    /** Add categorical tags to every game returned by this search. */
+    public Database.TagUpdateReport addGameTags(String... tags) {
+        return updateGameTags(Arrays.asList(tags), List.of());
+    }
+
+    /** Remove categorical tags from every game returned by this search. */
+    public Database.TagUpdateReport removeGameTags(String... tags) {
+        return updateGameTags(List.of(), Arrays.asList(tags));
+    }
+
+    /** Replace categorical tags on every game returned by this search. */
+    public Database.TagUpdateReport setGameTags(Collection<String> tags) {
+        synchronized (db) {
+            List<Integer> ids = find().stream().map(Game::id).toList();
+            return db.setGameTags(ids, tags);
+        }
+    }
+
     private static String lower(String s) {
         return s == null ? null : s.toLowerCase(Locale.ROOT);
     }

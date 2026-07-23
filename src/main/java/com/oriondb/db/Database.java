@@ -285,6 +285,57 @@ public final class Database implements AutoCloseable {
     }
 
     /**
+     * Rename a categorical tag everywhere.
+     *
+     * The destination must not already be in use; call
+     * {@link #mergeGameTag(String, String)} when combining two tags is
+     * intentional.
+     */
+    public synchronized TagUpdateReport renameGameTag(String source, String destination) {
+        String from = GameTags.normalize(source);
+        String to = GameTags.normalize(destination);
+        List<Integer> sourceIds = gameIdsWithTag(from);
+        if (sourceIds.isEmpty()) {
+            return new TagUpdateReport(0, 0, List.of());
+        }
+        if (!from.equals(to) && gameTagCounts().containsKey(to)) {
+            throw new IllegalArgumentException(
+                "Game tag '" + to + "' already exists; use mergeGameTag");
+        }
+        return replaceGameTag(sourceIds, from, to);
+    }
+
+    /** Merge a categorical tag into another tag everywhere. */
+    public synchronized TagUpdateReport mergeGameTag(String source, String destination) {
+        String from = GameTags.normalize(source);
+        return replaceGameTag(
+            gameIdsWithTag(from), from, GameTags.normalize(destination));
+    }
+
+    /** Delete a categorical tag from every game. */
+    public synchronized TagUpdateReport deleteGameTag(String tag) {
+        String normalized = GameTags.normalize(tag);
+        return updateGameTags(
+            gameIdsWithTag(normalized), List.of(), List.of(normalized));
+    }
+
+    private List<Integer> gameIdsWithTag(String tag) {
+        return games.values().stream()
+            .filter(game -> game.hasGameTag(tag))
+            .map(Game::id)
+            .toList();
+    }
+
+    private TagUpdateReport replaceGameTag(
+            Collection<Integer> ids, String source, String destination) {
+        if (source.equals(destination)) {
+            return new TagUpdateReport(0, ids.size(), List.of());
+        }
+        return updateGameTags(
+            ids, List.of(destination), List.of(source));
+    }
+
+    /**
      * Packed (gameId &lt;&lt; 16 | ply) entries for every game containing this
      * position on its mainline (first occurrence per game). Never null.
      */

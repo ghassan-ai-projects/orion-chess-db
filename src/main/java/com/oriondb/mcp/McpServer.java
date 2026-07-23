@@ -163,7 +163,8 @@ public final class McpServer {
             + "opening_explorer for move statistics from any position, "
             + "player_report and head_to_head for player analysis, and "
             + "import_pgn / add_game / delete_game / set_tag to edit, or "
-            + "batch_mutate for all-or-nothing edits. "
+            + "tag_games_by_search for bulk categorization and batch_mutate "
+            + "for all-or-nothing edits. "
             + "Mutations save to disk automatically.");
         return result;
     }

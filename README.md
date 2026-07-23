@@ -95,6 +95,10 @@ Everything runs through the launcher (or `java -jar target/oriondb.jar ...`):
 ./bin/oriondb tag mygames.pgn --ids 17 --add "tactics,study"
 ./bin/oriondb tag mygames.pgn --ids 1,5,9 --add reviewed --remove inbox
 ./bin/oriondb tag mygames.pgn --ids 17 --set "favorite,opening prep"
+./bin/oriondb tag mygames.pgn --player Carlsen --tagged inbox --add reviewed
+./bin/oriondb tag mygames.pgn --rename opening-prep --to "opening prep"
+./bin/oriondb tag mygames.pgn --merge todo --into inbox
+./bin/oriondb tag mygames.pgn --delete-tag obsolete
 
 # Opening explorer from any position
 ./bin/oriondb explorer mygames.pgn "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6"
@@ -158,6 +162,8 @@ claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygam
 | `delete_game` | Remove a game |
 | `set_tag` | Edit or remove a PGN tag |
 | `update_game_tags` | Add, remove, or replace categories on one or many games |
+| `tag_games_by_search` | Tag every game matching metadata, position, or tag filters |
+| `manage_game_tag` | Rename, merge, or delete a tag everywhere |
 | `batch_mutate` | Apply multiple mutations atomically and save once |
 | `export_pgn` | Export by ids or everything, to text or file |
 | `find_duplicates` | Groups of games with identical moves |
@@ -200,6 +206,11 @@ try (Database db = Database.open(Path.of("mygames.pgn"))) {
         .tags("tactics", "study")       // all supplied tags
         .withoutTag("archived")
         .find();
+    db.search().player("Carlsen").tag("inbox")
+        .addGameTags("reviewed");
+    db.renameGameTag("opening-prep", "opening prep");
+    db.mergeGameTag("todo", "inbox");
+    db.deleteGameTag("obsolete");
 
     // Stored games are read-only so indexes cannot silently become stale.
     // Copy and atomically replace a game when editing moves or annotations.

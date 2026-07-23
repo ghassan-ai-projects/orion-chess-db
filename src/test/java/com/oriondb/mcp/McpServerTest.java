@@ -85,7 +85,7 @@ class McpServerTest {
     void toolsList() {
         JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
         JsonArray tools = response.getAsJsonObject("result").getAsJsonArray("tools");
-        assertEquals(15, tools.size());
+        assertEquals(17, tools.size());
         boolean foundSearch = false;
         boolean foundGameTags = false;
         boolean foundBatch = false;
@@ -234,6 +234,42 @@ class McpServerTest {
             """.formatted(morphy));
         assertTrue(failed.get("isError").getAsBoolean());
         assertNotEquals("Must Roll Back", db.game(morphy).event());
+    }
+
+    @Test
+    void tagsCanBeManagedAndAppliedBySearch() {
+        int morphy = db.search().player("Morphy").find().get(0).id();
+        int kasparov = db.search().player("Kasparov").find().get(0).id();
+        payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + morphy + "],\"add\":[\"inbox\"]}"));
+        payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + kasparov + "],\"add\":[\"reviewed\"]}"));
+
+        JsonObject selected = payload(callTool("tag_games_by_search",
+            "{\"player\":\"Morphy\",\"add\":[\"study\"]}"));
+        assertEquals(1, selected.get("games_matched").getAsInt());
+        assertTrue(db.game(morphy).hasGameTag("study"));
+        assertFalse(db.game(kasparov).hasGameTag("study"));
+
+        JsonObject unsafe = callTool("tag_games_by_search",
+            "{\"add\":[\"accidental\"]}");
+        assertTrue(unsafe.get("isError").getAsBoolean());
+        assertEquals(0, db.search().tag("accidental").count());
+
+        JsonObject renamed = payload(callTool("manage_game_tag",
+            "{\"action\":\"rename\",\"source\":\"inbox\",\"destination\":\"queue\"}"));
+        assertEquals(1, renamed.get("games_updated").getAsInt());
+        assertTrue(db.game(morphy).hasGameTag("queue"));
+
+        JsonObject conflict = callTool("manage_game_tag",
+            "{\"action\":\"rename\",\"source\":\"queue\",\"destination\":\"reviewed\"}");
+        assertTrue(conflict.get("isError").getAsBoolean());
+        assertTrue(db.game(morphy).hasGameTag("queue"));
+
+        JsonObject merged = payload(callTool("manage_game_tag",
+            "{\"action\":\"merge\",\"source\":\"queue\",\"destination\":\"reviewed\"}"));
+        assertEquals(1, merged.get("games_updated").getAsInt());
+        assertTrue(db.game(morphy).hasGameTag("reviewed"));
     }
 
     @Test

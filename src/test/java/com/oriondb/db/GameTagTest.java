@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -92,6 +93,59 @@ class GameTagTest {
             () -> db.updateGameTags(ids, List.of("valid", "bad,tag"), List.of()));
         assertTrue(db.game(ids.get(0)).gameTags().isEmpty());
         assertTrue(db.game(ids.get(1)).gameTags().isEmpty());
+    }
+
+    @Test
+    void tagsCanBeRenamedMergedAndDeletedAcrossTheDatabase() {
+        Database db = database();
+        List<Integer> ids = db.games().stream().map(Game::id).toList();
+        db.addGameTags(ids.get(0), "to review");
+
+        Database.TagUpdateReport renamed =
+            db.renameGameTag("TO   REVIEW", "review queue");
+        assertEquals(1, renamed.gamesUpdated());
+        assertEquals(Set.of("review queue"), db.game(ids.get(0)).gameTags());
+        assertTrue(db.game(ids.get(1)).gameTags().isEmpty(),
+            "games without the source tag must not gain the destination");
+
+        db.addGameTags(ids.get(0), "favorite");
+        db.addGameTags(ids.get(1), "review queue");
+        assertThrows(IllegalArgumentException.class,
+            () -> db.renameGameTag("review queue", "favorite"));
+
+        Database.TagUpdateReport merged =
+            db.mergeGameTag("review queue", "favorite");
+        assertEquals(2, merged.gamesUpdated());
+        assertEquals(Set.of("favorite"), db.game(ids.get(0)).gameTags());
+        assertEquals(Set.of("favorite"), db.game(ids.get(1)).gameTags());
+
+        Database.TagUpdateReport deleted = db.deleteGameTag("FAVORITE");
+        assertEquals(2, deleted.gamesUpdated());
+        assertTrue(db.game(ids.get(0)).gameTags().isEmpty());
+        assertTrue(db.game(ids.get(1)).gameTags().isEmpty());
+    }
+
+    @Test
+    void searchResultsCanBeTaggedDirectly() {
+        Database db = database();
+        List<Integer> ids = db.games().stream().map(Game::id).toList();
+        db.addGameTags(ids, List.of("inbox"));
+
+        Database.TagUpdateReport selected =
+            db.search().player("Alpha").addGameTags("reviewed");
+        assertEquals(1, selected.gamesUpdated());
+        assertTrue(db.game(ids.get(0)).hasGameTag("reviewed"));
+        assertFalse(db.game(ids.get(1)).hasGameTag("reviewed"));
+
+        Database.TagUpdateReport limited =
+            db.search().tag("inbox").limit(1).addGameTags("first");
+        assertEquals(1, limited.gamesUpdated());
+        assertEquals(1, db.search().tag("first").count());
+
+        Database.TagUpdateReport replaced =
+            db.search().tag("reviewed").setGameTags(List.of("done"));
+        assertEquals(1, replaced.gamesUpdated());
+        assertEquals(Set.of("done"), db.game(ids.get(0)).gameTags());
     }
 
     @Test

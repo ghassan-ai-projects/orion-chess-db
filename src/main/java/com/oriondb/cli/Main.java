@@ -110,7 +110,10 @@ public final class Main {
               player    Player dossier: player db.pgn "Carlsen"
               h2h       Head to head: h2h db.pgn "Kasparov" "Karpov"
               tag       Update game tags: tag db.pgn --ids 1,2 --add tactics,study
-                        Use --remove TAGS or --set TAGS to replace all
+                        Select with --player/--event/--eco/--tagged/--without-tag
+                        Use --all explicitly to select every game
+                        Manage tags with --rename OLD --to NEW, --merge OLD --into NEW,
+                        or --delete-tag TAG
               export    Write PGN: export db.pgn [--ids 1,2,3] [-o out.pgn]
               dedupe    List duplicate games
 
@@ -388,9 +391,23 @@ public final class Main {
         List<String> add = new ArrayList<>();
         List<String> remove = new ArrayList<>();
         List<String> replacement = null;
+        List<String> requiredTags = new ArrayList<>();
+        List<String> anyTags = new ArrayList<>();
+        List<String> excludedTags = new ArrayList<>();
+        String player = null;
+        String event = null;
+        String eco = null;
+        boolean selectAll = false;
+        String managementAction = null;
+        String managementSource = null;
+        String managementDestination = null;
 
         for (int i = 0; i < args.length; i++) {
             String flag = args[i];
+            if ("--all".equals(flag)) {
+                selectAll = true;
+                continue;
+            }
             if (i + 1 >= args.length) {
                 throw new UsageException("Missing value for " + flag);
             }
@@ -410,12 +427,76 @@ public final class Main {
                 case "--set":
                     replacement = tagList(value);
                     break;
+                case "--player":
+                    player = value;
+                    break;
+                case "--event":
+                    event = value;
+                    break;
+                case "--eco":
+                    eco = value;
+                    break;
+                case "--tagged":
+                    requiredTags.addAll(tagList(value));
+                    break;
+                case "--any-tagged":
+                    anyTags.addAll(tagList(value));
+                    break;
+                case "--without-tag":
+                    excludedTags.addAll(tagList(value));
+                    break;
+                case "--rename":
+                case "--merge":
+                case "--delete-tag":
+                    if (managementAction != null) {
+                        throw new UsageException("Only one tag management action is allowed");
+                    }
+                    managementAction = flag;
+                    managementSource = value;
+                    break;
+                case "--to":
+                case "--into":
+                    managementDestination = value;
+                    break;
                 default:
                     throw new UsageException("Unknown tag option: " + flag);
             }
         }
-        if (ids.isEmpty()) {
-            throw new UsageException("tag needs --ids with one or more game ids");
+
+        boolean hasSearchSelection = selectAll || player != null || event != null
+            || eco != null || !requiredTags.isEmpty() || !anyTags.isEmpty()
+            || !excludedTags.isEmpty();
+        if (managementAction == null && managementDestination != null) {
+            throw new UsageException("--to/--into requires --rename or --merge");
+        }
+        if (managementAction != null) {
+            if (!ids.isEmpty() || hasSearchSelection || replacement != null
+                    || !add.isEmpty() || !remove.isEmpty()) {
+                throw new UsageException(
+                    "Tag management cannot be combined with game selection or updates");
+            }
+            if (!"--delete-tag".equals(managementAction)
+                    && managementDestination == null) {
+                throw new UsageException(managementAction + " needs --to or --into");
+            }
+            if ("--delete-tag".equals(managementAction)
+                    && managementDestination != null) {
+                throw new UsageException("--delete-tag cannot use --to or --into");
+            }
+            manageTag(dbPath, managementAction, managementSource, managementDestination);
+            return;
+        }
+        if (ids.isEmpty() && !hasSearchSelection) {
+            throw new UsageException(
+                "tag needs --ids, search filters, or an explicit --all");
+        }
+        if (!ids.isEmpty() && hasSearchSelection) {
+            throw new UsageException("--ids cannot be combined with search selection");
+        }
+        if (selectAll && (player != null || event != null || eco != null
+                || !requiredTags.isEmpty() || !anyTags.isEmpty()
+                || !excludedTags.isEmpty())) {
+            throw new UsageException("--all cannot be combined with search filters");
         }
         if (replacement != null && (!add.isEmpty() || !remove.isEmpty())) {
             throw new UsageException("--set cannot be combined with --add or --remove");
@@ -426,6 +507,16 @@ public final class Main {
 
         try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
             db.setSaveOnClose(false);
+            if (ids.isEmpty()) {
+                Search selection = db.search();
+                if (player != null) selection.player(player);
+                if (event != null) selection.event(event);
+                if (eco != null) selection.eco(eco);
+                if (!requiredTags.isEmpty()) selection.tags(requiredTags);
+                if (!anyTags.isEmpty()) selection.anyTags(anyTags);
+                if (!excludedTags.isEmpty()) selection.withoutTags(excludedTags);
+                ids.addAll(selection.find().stream().map(Game::id).toList());
+            }
             Database.TagUpdateReport report = replacement != null
                 ? db.setGameTags(ids, replacement)
                 : db.updateGameTags(ids, add, remove);
@@ -437,6 +528,23 @@ public final class Main {
             if (!report.missingGameIds().isEmpty()) {
                 System.out.println("Missing game ids: " + report.missingGameIds());
             }
+        }
+    }
+
+    private static void manageTag(
+            Path dbPath, String action, String source, String destination)
+            throws Exception {
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
+            db.setSaveOnClose(false);
+            Database.TagUpdateReport report = switch (action) {
+                case "--rename" -> db.renameGameTag(source, destination);
+                case "--merge" -> db.mergeGameTag(source, destination);
+                case "--delete-tag" -> db.deleteGameTag(source);
+                default -> throw new AssertionError("Unknown tag management action");
+            };
+            if (report.gamesUpdated() > 0) db.save();
+            System.out.printf("%d games updated, %d unchanged.%n",
+                report.gamesUpdated(), report.gamesUnchanged());
         }
     }
 
