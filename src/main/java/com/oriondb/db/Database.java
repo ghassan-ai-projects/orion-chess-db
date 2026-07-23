@@ -11,6 +11,8 @@ import com.oriondb.search.Search;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -85,6 +87,17 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    /** Options affecting persistence behavior when a database is opened. */
+    public record OpenOptions(boolean processLock, boolean backupsEnabled) {
+        public static OpenOptions defaults() {
+            return new OpenOptions(false, true);
+        }
+
+        public static OpenOptions locked() {
+            return new OpenOptions(true, true);
+        }
+    }
+
     /** Outcome of setting or updating categorical tags on one or more games. */
     public record TagUpdateReport(
         int gamesUpdated,
@@ -114,6 +127,20 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    /** The optional process-level database lock is held by another owner. */
+    public static final class DatabaseLockException extends IOException {
+        private final Path lockPath;
+
+        private DatabaseLockException(Path lockPath) {
+            super("Database is locked by another process: " + lockPath);
+            this.lockPath = lockPath;
+        }
+
+        public Path lockPath() {
+            return lockPath;
+        }
+    }
+
     private final Path path;                                  // null for in-memory
     private final LinkedHashMap<Integer, Game> games = new LinkedHashMap<>();
     private final Map<Integer, GameData> data = new HashMap<>();
@@ -124,13 +151,18 @@ public final class Database implements AutoCloseable {
     private int nextId = 1;
     private boolean dirty;
     private boolean saveOnClose = true;
+    private boolean backupsEnabled;
     private ImportReport lastImportReport =
         new ImportReport(0, 0, 0, List.of(), List.of());
     /** SHA-256 of the file state loaded or last saved; null means it did not exist. */
     private String persistedFingerprint;
+    private FileChannel lockChannel;
+    private FileLock processLock;
+    private boolean closed;
 
-    private Database(Path path) {
+    private Database(Path path, boolean backupsEnabled) {
         this.path = path;
+        this.backupsEnabled = backupsEnabled;
     }
 
     // ------------------------------------------------------------------
@@ -143,35 +175,72 @@ public final class Database implements AutoCloseable {
      * available via the returned database's last import report.
      */
     public static Database open(Path pgnPath) throws IOException {
+        return open(pgnPath, OpenOptions.defaults());
+    }
+
+    /**
+     * Open a database with explicit backup and process-lock behavior.
+     * Process locking is fail-fast and uses a stable sibling {@code .lock}
+     * file so it remains valid while atomic saves replace the PGN file.
+     */
+    public static Database open(Path pgnPath, OpenOptions options) throws IOException {
         Path normalized = Objects.requireNonNull(pgnPath, "pgnPath")
             .toAbsolutePath().normalize();
-        Database db = new Database(normalized);
-        if (Files.exists(normalized)) {
-            String beforeRead = fingerprint(normalized);
-            String pgn = PgnReader.readFileText(normalized);
-            String afterRead = fingerprint(normalized);
-            if (!Objects.equals(beforeRead, afterRead)) {
-                throw new FileConflictException(
-                    normalized, "Database changed while it was being opened");
+        OpenOptions resolved = Objects.requireNonNull(options, "options");
+        Database db = new Database(normalized, resolved.backupsEnabled());
+        try {
+            if (resolved.processLock()) {
+                db.acquireProcessLock();
             }
-            db.importPgn(pgn);
-            int persistedNextId = readNextId(pgn);
-            if (persistedNextId > db.nextId) {
-                db.nextId = persistedNextId;
+            if (Files.exists(normalized)) {
+                String beforeRead = fingerprint(normalized);
+                String pgn = PgnReader.readFileText(normalized);
+                String afterRead = fingerprint(normalized);
+                if (!Objects.equals(beforeRead, afterRead)) {
+                    throw new FileConflictException(
+                        normalized, "Database changed while it was being opened");
+                }
+                db.importPgn(pgn);
+                int persistedNextId = readNextId(pgn);
+                if (persistedNextId > db.nextId) {
+                    db.nextId = persistedNextId;
+                }
+                db.dirty = false; // freshly loaded state matches the file
+                db.persistedFingerprint = afterRead;
             }
-            db.dirty = false; // freshly loaded state matches the file
-            db.persistedFingerprint = afterRead;
+            return db;
+        } catch (IOException | RuntimeException e) {
+            db.releaseProcessLock(e);
+            throw e;
         }
-        return db;
     }
 
     /** A database that lives only in memory ({@link #save()} requires saveAs). */
     public static Database inMemory() {
-        return new Database(null);
+        return new Database(null, false);
     }
 
     public Path path() {
         return path;
+    }
+
+    /** Sibling backup path used for this database, or null for in-memory databases. */
+    public Path backupPath() {
+        return path == null ? null : backupPath(path);
+    }
+
+    public static Path backupPath(Path databasePath) {
+        Path normalized = Objects.requireNonNull(databasePath, "databasePath")
+            .toAbsolutePath().normalize();
+        return normalized.resolveSibling(normalized.getFileName() + ".bak");
+    }
+
+    public Path lockPath() {
+        return path == null ? null : lockPath(path);
+    }
+
+    private static Path lockPath(Path databasePath) {
+        return databasePath.resolveSibling(databasePath.getFileName() + ".lock");
     }
 
     // ------------------------------------------------------------------
@@ -627,6 +696,15 @@ public final class Database implements AutoCloseable {
         this.saveOnClose = saveOnClose;
     }
 
+    /** Whether an existing target is copied to a one-generation backup before save. */
+    public synchronized void setBackupsEnabled(boolean backupsEnabled) {
+        this.backupsEnabled = backupsEnabled;
+    }
+
+    public synchronized boolean backupsEnabled() {
+        return backupsEnabled;
+    }
+
     /**
      * Atomically rewrite the database file (write to a temp file in the
      * same directory, then move into place).
@@ -661,20 +739,42 @@ public final class Database implements AutoCloseable {
         if (dir != null) {
             Files.createDirectories(dir);
         }
+        if (backupsEnabled && Files.exists(target)) {
+            writeBackup(target);
+        }
         Path temp = Files.createTempFile(dir, ".orion-", ".pgn.tmp");
         try {
             Files.writeString(temp, pgn, StandardCharsets.UTF_8);
             try (FileChannel channel = FileChannel.open(temp, StandardOpenOption.WRITE)) {
                 channel.force(true);
             }
-            try {
-                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
-            }
+            moveReplacing(temp, target);
         } finally {
             Files.deleteIfExists(temp);
+        }
+    }
+
+    private static void writeBackup(Path target) throws IOException {
+        Path backup = backupPath(target);
+        Path dir = backup.getParent();
+        Path temp = Files.createTempFile(dir, ".orion-backup-", ".tmp");
+        try {
+            Files.copy(target, temp, StandardCopyOption.REPLACE_EXISTING);
+            try (FileChannel channel = FileChannel.open(temp, StandardOpenOption.WRITE)) {
+                channel.force(true);
+            }
+            moveReplacing(temp, backup);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    private static void moveReplacing(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 
@@ -690,9 +790,81 @@ public final class Database implements AutoCloseable {
 
     @Override
     public synchronized void close() throws IOException {
-        if (saveOnClose && dirty && path != null) {
-            save();
+        if (closed) return;
+        IOException failure = null;
+        try {
+            if (saveOnClose && dirty && path != null) {
+                save();
+            }
+        } catch (IOException e) {
+            failure = e;
+        } finally {
+            closed = true;
+            failure = releaseProcessLock(failure);
         }
+        if (failure != null) throw failure;
+    }
+
+    private void acquireProcessLock() throws IOException {
+        Path lockFile = lockPath(path);
+        Path parent = lockFile.getParent();
+        if (parent != null) Files.createDirectories(parent);
+        lockChannel = FileChannel.open(lockFile,
+            StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        try {
+            processLock = lockChannel.tryLock();
+            if (processLock == null) {
+                throw new DatabaseLockException(lockFile);
+            }
+        } catch (OverlappingFileLockException e) {
+            DatabaseLockException lockError = new DatabaseLockException(lockFile);
+            closeLockChannelAfterFailedAcquire(lockError);
+            throw lockError;
+        } catch (IOException | RuntimeException e) {
+            closeLockChannelAfterFailedAcquire(e);
+            throw e;
+        }
+    }
+
+    private void closeLockChannelAfterFailedAcquire(Throwable failure) {
+        try {
+            lockChannel.close();
+        } catch (IOException closeError) {
+            failure.addSuppressed(closeError);
+        }
+        lockChannel = null;
+    }
+
+    private IOException releaseProcessLock(Throwable priorFailure) {
+        IOException releaseFailure = null;
+        if (processLock != null) {
+            try {
+                processLock.release();
+            } catch (IOException e) {
+                releaseFailure = e;
+            }
+            processLock = null;
+        }
+        if (lockChannel != null) {
+            try {
+                lockChannel.close();
+            } catch (IOException e) {
+                if (releaseFailure == null) releaseFailure = e;
+                else releaseFailure.addSuppressed(e);
+            }
+            lockChannel = null;
+        }
+        if (priorFailure instanceof IOException priorIo) {
+            if (releaseFailure != null) {
+                priorIo.addSuppressed(releaseFailure);
+            }
+            return priorIo;
+        }
+        if (priorFailure != null && releaseFailure != null) {
+            priorFailure.addSuppressed(releaseFailure);
+            return null;
+        }
+        return releaseFailure;
     }
 
     private static String fingerprint(Path file) throws IOException {

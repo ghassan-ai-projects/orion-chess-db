@@ -62,7 +62,8 @@ nothing to migrate.
 - **Stable game identity.** Database-assigned ids survive deletes and restarts
   through the portable `OrionDBId` PGN tag.
 - **Zero-infrastructure.** One 500 KB jar, one PGN file. Durable atomic saves
-  reject conflicting edits made by another process.
+  reject conflicting edits made by another process and keep the previous
+  generation in `your-games.pgn.bak`.
   12,500 real master games import in ~7 s and reopen in ~6 s on a laptop;
   a 3,000-game personal collection feels instant.
 
@@ -161,6 +162,8 @@ claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygam
 | `find_duplicates` | Groups of games with identical moves |
 
 Mutations save to disk automatically (atomic temp-file + rename).
+The CLI and MCP server also hold `your-games.pgn.lock` while they can mutate a
+database, so a second writer fails fast instead of racing the first.
 
 `search_games` filters: `white`, `black`, `player`, `event`, `site`, `eco`
 (exact / prefix / range), `opening`, `result`, `date_from`, `date_to`,
@@ -205,6 +208,20 @@ try (Database db = Database.open(Path.of("mygames.pgn"))) {
 }
 ```
 
+`Database.open(path)` enables one-generation backups but does not take a
+process lock, which keeps read-only embedding simple. Long-lived writers can
+opt into exclusive access:
+
+```java
+try (Database db = Database.open(
+        Path.of("mygames.pgn"), Database.OpenOptions.locked())) {
+    // Mutate and save while holding mygames.pgn.lock.
+}
+```
+
+Use `db.setBackupsEnabled(false)` only when another layer already manages
+recovery copies.
+
 See [examples/ApiExample.java](examples/ApiExample.java) for a complete
 program, and [examples/famous-games.pgn](examples/famous-games.pgn) for a tiny
 sample database.
@@ -216,8 +233,10 @@ sample database.
   re-validates and re-indexes it (parallelized across cores), which takes a
   couple of seconds and guarantees indexes are never stale. Stable ids use
   the `OrionDBId` tag plus one standard PGN `%` escape line for the next id.
-  Saves are atomic, flushed before rename, and refuse to overwrite a backing
-  file changed since it was opened.
+  Saves are atomic, flushed before rename, keep one previous generation, and
+  refuse to overwrite a backing file changed since it was opened. An optional
+  sidecar-file lock coordinates writers across processes and remains valid
+  when the PGN inode is atomically replaced.
 - **Mutation is explicit.** Games returned by `game`, `games`, and searches are
   read-only. Use `copy()` plus `replace(id, game)` for an atomic validated edit,
   or `setTag` for metadata. Read methods return snapshots or defensive copies,

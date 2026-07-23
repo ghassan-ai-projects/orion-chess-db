@@ -121,10 +121,11 @@ public final class Main {
 
     private static void mcp(Path dbPath) throws Exception {
         // stdout carries only protocol messages; announce on stderr.
-        Database db = Database.open(dbPath);
-        System.err.println("oriondb mcp: serving " + db.gameCount() + " games from " + dbPath);
-        new McpServer(db).run();
-        db.close();
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
+            System.err.println(
+                "oriondb mcp: serving " + db.gameCount() + " games from " + dbPath);
+            new McpServer(db).run();
+        }
     }
 
     private static void stats(Path dbPath) throws Exception {
@@ -170,7 +171,7 @@ public final class Main {
         if (args.length == 0) {
             throw new UsageException("import needs a PGN file to import");
         }
-        try (Database db = Database.open(dbPath)) {
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
             for (String file : args) {
                 long start = System.currentTimeMillis();
                 Database.ImportReport report = db.importFile(Path.of(file));
@@ -423,7 +424,7 @@ public final class Main {
             throw new UsageException("tag needs --add, --remove, or --set");
         }
 
-        try (Database db = Database.open(dbPath)) {
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
             db.setSaveOnClose(false);
             Database.TagUpdateReport report = replacement != null
                 ? db.setGameTags(ids, replacement)
