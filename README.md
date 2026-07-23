@@ -158,6 +158,7 @@ claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygam
 | `delete_game` | Remove a game |
 | `set_tag` | Edit or remove a PGN tag |
 | `update_game_tags` | Add, remove, or replace categories on one or many games |
+| `batch_mutate` | Apply multiple mutations atomically and save once |
 | `export_pgn` | Export by ids or everything, to text or file |
 | `find_duplicates` | Groups of games with identical moves |
 
@@ -205,6 +206,14 @@ try (Database db = Database.open(Path.of("mygames.pgn"))) {
     Game edited = games.get(0).copy();
     edited.setTag("Annotator", "My Tool");
     db.replace(edited.id(), edited);
+
+    // Multiple changes commit together. Any exception restores games,
+    // assigned ids, and derived indexes.
+    db.transactionAndSave(tx -> {
+        tx.setTag(edited.id(), "Annotator", "My Tool");
+        tx.addGameTags(edited.id(), "reviewed");
+        return null;
+    });
 }
 ```
 
@@ -241,6 +250,10 @@ sample database.
   read-only. Use `copy()` plus `replace(id, game)` for an atomic validated edit,
   or `setTag` for metadata. Read methods return snapshots or defensive copies,
   making concurrent readers safe while writes are serialized.
+- **Batches are transactional.** `transaction` restores games, ids, import
+  state, and indexes when its callback fails. `transactionAndSave` adds one
+  persistence step after all operations succeed. Persistence calls are blocked
+  inside callbacks so a partial batch cannot escape early.
 - **The chess core is the foundation.** SAN disambiguation legally requires
   pin-aware move generation (`Re2` when one rook is pinned), so the engine
   implements full legality and is perft-validated. Zobrist hashes use the

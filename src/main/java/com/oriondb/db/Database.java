@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -158,6 +159,7 @@ public final class Database implements AutoCloseable {
     private String persistedFingerprint;
     private FileChannel lockChannel;
     private FileLock processLock;
+    private boolean transactionActive;
     private boolean closed;
 
     private Database(Path path, boolean backupsEnabled) {
@@ -321,6 +323,98 @@ public final class Database implements AutoCloseable {
     // ------------------------------------------------------------------
     // Writing
     // ------------------------------------------------------------------
+
+    /**
+     * Apply several database operations as one in-memory transaction.
+     *
+     * If the callback throws, games, assigned ids, import state, and derived
+     * indexes are restored to their pre-transaction state. Persistence is not
+     * allowed inside the callback; call {@link #save()} after a successful
+     * transaction or use {@link #transactionAndSave(Function)}.
+     */
+    public synchronized <T> T transaction(Function<Database, T> work) {
+        try {
+            return runTransaction(work, false);
+        } catch (IOException impossible) {
+            throw new AssertionError("An in-memory transaction attempted I/O", impossible);
+        }
+    }
+
+    /**
+     * Apply several database operations atomically and save once after the
+     * callback succeeds. In-memory databases commit without persistence.
+     */
+    public synchronized <T> T transactionAndSave(Function<Database, T> work)
+            throws IOException {
+        return runTransaction(work, true);
+    }
+
+    private <T> T runTransaction(Function<Database, T> work, boolean saveAfter)
+            throws IOException {
+        Objects.requireNonNull(work, "work");
+        if (transactionActive) {
+            throw new IllegalStateException("Nested database transactions are not supported");
+        }
+        TransactionSnapshot before = transactionSnapshot();
+        transactionActive = true;
+        try {
+            T result = work.apply(this);
+            if (saveAfter && path != null && dirty) {
+                transactionActive = false;
+                saveInternal();
+                transactionActive = true;
+            }
+            return result;
+        } catch (IOException | RuntimeException | Error e) {
+            restoreTransaction(before);
+            throw e;
+        } finally {
+            transactionActive = false;
+        }
+    }
+
+    private TransactionSnapshot transactionSnapshot() {
+        return new TransactionSnapshot(
+            new LinkedHashMap<>(games),
+            new HashMap<>(data),
+            nextId,
+            dirty,
+            saveOnClose,
+            backupsEnabled,
+            lastImportReport,
+            persistedFingerprint);
+    }
+
+    private void restoreTransaction(TransactionSnapshot snapshot) {
+        games.clear();
+        games.putAll(snapshot.games());
+        data.clear();
+        data.putAll(snapshot.data());
+        positionIndex.clear();
+        duplicateIndex.clear();
+        for (int gameId : games.keySet()) {
+            GameData gameData = data.get(gameId);
+            indexPositions(gameId, gameData);
+            indexDuplicate(gameId, gameData);
+        }
+        nextId = snapshot.nextId();
+        dirty = snapshot.dirty();
+        saveOnClose = snapshot.saveOnClose();
+        backupsEnabled = snapshot.backupsEnabled();
+        lastImportReport = snapshot.lastImportReport();
+        persistedFingerprint = snapshot.persistedFingerprint();
+    }
+
+    private record TransactionSnapshot(
+        LinkedHashMap<Integer, Game> games,
+        Map<Integer, GameData> data,
+        int nextId,
+        boolean dirty,
+        boolean saveOnClose,
+        boolean backupsEnabled,
+        ImportReport lastImportReport,
+        String persistedFingerprint
+    ) {}
 
     /**
      * Add a validated game. The game's moves are replayed; illegal games
@@ -710,6 +804,11 @@ public final class Database implements AutoCloseable {
      * same directory, then move into place).
      */
     public synchronized void save() throws IOException {
+        requireOutsideTransaction("save");
+        saveInternal();
+    }
+
+    private void saveInternal() throws IOException {
         if (path == null) {
             throw new IllegalStateException("In-memory database: use saveAs(path)");
         }
@@ -724,12 +823,20 @@ public final class Database implements AutoCloseable {
     }
 
     public synchronized void saveAs(Path target) throws IOException {
+        requireOutsideTransaction("saveAs");
         Path normalized = Objects.requireNonNull(target, "target").toAbsolutePath().normalize();
         if (path != null && path.equals(normalized)) {
-            save();
+            saveInternal();
             return;
         }
         writeAtomically(normalized);
+    }
+
+    private void requireOutsideTransaction(String operation) {
+        if (transactionActive) {
+            throw new IllegalStateException(
+                operation + " is not allowed inside a database transaction");
+        }
     }
 
     private void writeAtomically(Path target) throws IOException {
@@ -791,6 +898,7 @@ public final class Database implements AutoCloseable {
     @Override
     public synchronized void close() throws IOException {
         if (closed) return;
+        requireOutsideTransaction("close");
         IOException failure = null;
         try {
             if (saveOnClose && dirty && path != null) {

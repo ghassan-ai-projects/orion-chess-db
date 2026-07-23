@@ -85,9 +85,10 @@ class McpServerTest {
     void toolsList() {
         JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
         JsonArray tools = response.getAsJsonObject("result").getAsJsonArray("tools");
-        assertEquals(14, tools.size());
+        assertEquals(15, tools.size());
         boolean foundSearch = false;
         boolean foundGameTags = false;
+        boolean foundBatch = false;
         for (var tool : tools) {
             JsonObject t = tool.getAsJsonObject();
             assertTrue(t.has("name"));
@@ -96,9 +97,11 @@ class McpServerTest {
                 t.getAsJsonObject("inputSchema").get("type").getAsString());
             if (t.get("name").getAsString().equals("search_games")) foundSearch = true;
             if (t.get("name").getAsString().equals("update_game_tags")) foundGameTags = true;
+            if (t.get("name").getAsString().equals("batch_mutate")) foundBatch = true;
         }
         assertTrue(foundSearch);
         assertTrue(foundGameTags);
+        assertTrue(foundBatch);
     }
 
     @Test
@@ -206,6 +209,31 @@ class McpServerTest {
         assertEquals(1, excluded.get("total_count").getAsInt());
         assertEquals(kasparov, excluded.getAsJsonArray("games")
             .get(0).getAsJsonObject().get("game_id").getAsInt());
+    }
+
+    @Test
+    void batchMutationsCommitTogetherOrRollBackTogether() {
+        int morphy = db.search().player("Morphy").find().get(0).id();
+        int kasparov = db.search().player("Kasparov").find().get(0).id();
+
+        JsonObject committed = payload(callTool("batch_mutate", """
+            {"operations":[
+              {"action":"set_tag","game_id":%d,"key":"Annotator","value":"Orion"},
+              {"action":"update_game_tags","game_ids":[%d],"add":["study"]}
+            ]}
+            """.formatted(morphy, kasparov)));
+        assertEquals(2, committed.get("operations_applied").getAsInt());
+        assertEquals("Orion", db.game(morphy).tag("Annotator"));
+        assertTrue(db.game(kasparov).hasGameTag("study"));
+
+        JsonObject failed = callTool("batch_mutate", """
+            {"operations":[
+              {"action":"set_tag","game_id":%d,"key":"Event","value":"Must Roll Back"},
+              {"action":"delete_game","game_id":99999}
+            ]}
+            """.formatted(morphy));
+        assertTrue(failed.get("isError").getAsBoolean());
+        assertNotEquals("Must Roll Back", db.game(morphy).event());
     }
 
     @Test

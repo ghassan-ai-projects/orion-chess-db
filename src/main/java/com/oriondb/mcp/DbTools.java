@@ -265,6 +265,13 @@ final class DbTools {
                 "game_ids"),
             this::updateGameTags);
 
+        add("batch_mutate",
+            "Apply multiple add_game, import_pgn, delete_game, set_tag, or "
+            + "update_game_tags operations as one transaction. Any invalid operation "
+            + "rolls back the entire batch; a successful batch saves once.",
+            schema(props(batchOperations()), "operations"),
+            this::batchMutate);
+
         add("export_pgn",
             "Export games as PGN text, or write them to a file when file_path is given. "
             + "Omit game_ids to export the whole database.",
@@ -349,6 +356,30 @@ final class DbTools {
         JsonObject p = typed(name, "array", description);
         JsonObject items = new JsonObject();
         items.addProperty("type", "string");
+        p.add("items", items);
+        return p;
+    }
+
+    private static JsonObject batchOperations() {
+        JsonObject p = typed("operations", "array",
+            "Ordered mutation objects. Each needs an action plus that action's normal "
+            + "arguments.");
+        JsonObject items = new JsonObject();
+        items.addProperty("type", "object");
+        items.add("properties", props(
+            str("action", "add_game, import_pgn, delete_game, set_tag, or update_game_tags"),
+            str("pgn_text", "PGN text for add_game or import_pgn"),
+            str("file_path", "PGN file for import_pgn"),
+            integer("game_id", "Game id for delete_game or set_tag"),
+            str("key", "PGN tag key for set_tag"),
+            str("value", "PGN tag value for set_tag; omit to remove"),
+            intArray("game_ids", "Game ids for update_game_tags"),
+            stringArray("add", "Categorical tags to add"),
+            stringArray("remove", "Categorical tags to remove"),
+            stringArray("set", "Replacement categorical tags")));
+        JsonArray required = new JsonArray();
+        required.add("action");
+        items.add("required", required);
         p.add("items", items);
         return p;
     }
@@ -751,6 +782,12 @@ final class DbTools {
     }
 
     private JsonObject importPgn(JsonObject args) {
+        JsonObject result = importPgnWithoutSave(args);
+        if (result.get("games_added").getAsInt() > 0) autoSave();
+        return result;
+    }
+
+    private JsonObject importPgnWithoutSave(JsonObject args) {
         String text = optString(args, "pgn_text");
         String filePath = optString(args, "file_path");
         if ((text == null) == (filePath == null)) {
@@ -764,7 +801,6 @@ final class DbTools {
             }
         }
         Database.ImportReport report = db.importPgn(text);
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("games_added", report.gamesAdded());
         result.addProperty("duplicates_skipped", report.duplicatesSkipped());
@@ -788,6 +824,12 @@ final class DbTools {
     }
 
     private JsonObject addGame(JsonObject args) {
+        JsonObject result = addGameWithoutSave(args);
+        autoSave();
+        return result;
+    }
+
+    private JsonObject addGameWithoutSave(JsonObject args) {
         String text = reqString(args, "pgn_text");
         var parsed = new com.oriondb.pgn.PgnReader(
             com.oriondb.pgn.PgnReader.ValidationMode.STRICT).readString(text);
@@ -803,7 +845,6 @@ final class DbTools {
             throw new ToolError("Expected exactly one game, found " + parsed.games().size());
         }
         int id = db.add(parsed.games().get(0));
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("game_id", id);
         result.addProperty("game_count", db.gameCount());
@@ -814,12 +855,17 @@ final class DbTools {
     }
 
     private JsonObject deleteGame(JsonObject args) {
+        JsonObject result = deleteGameWithoutSave(args);
+        autoSave();
+        return result;
+    }
+
+    private JsonObject deleteGameWithoutSave(JsonObject args) {
         int id = reqInt(args, "game_id");
         Game game = db.game(id);
         if (game == null) throw new ToolError("No game with id " + id);
         String description = game.toString();
         db.delete(id);
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("deleted", description);
         result.addProperty("game_count", db.gameCount());
@@ -827,13 +873,18 @@ final class DbTools {
     }
 
     private JsonObject setTag(JsonObject args) {
+        JsonObject result = setTagWithoutSave(args);
+        autoSave();
+        return result;
+    }
+
+    private JsonObject setTagWithoutSave(JsonObject args) {
         int id = reqInt(args, "game_id");
         String key = reqString(args, "key");
         String value = optString(args, "value");
         if (!db.setTag(id, key, value)) {
             throw new ToolError("No game with id " + id);
         }
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("game_id", id);
         result.addProperty("tag", key);
@@ -846,6 +897,12 @@ final class DbTools {
     }
 
     private JsonObject updateGameTags(JsonObject args) {
+        JsonObject result = updateGameTagsWithoutSave(args);
+        if (result.get("games_updated").getAsInt() > 0) autoSave();
+        return result;
+    }
+
+    private JsonObject updateGameTagsWithoutSave(JsonObject args) {
         List<Integer> ids = reqInts(args, "game_ids");
         boolean hasSet = args.has("set") && !args.get("set").isJsonNull();
         List<String> replacement = optStrings(args, "set");
@@ -861,7 +918,6 @@ final class DbTools {
         Database.TagUpdateReport report = hasSet
             ? db.setGameTags(ids, replacement)
             : db.updateGameTags(ids, add, remove);
-        if (report.gamesUpdated() > 0) autoSave();
 
         JsonObject result = new JsonObject();
         result.addProperty("games_updated", report.gamesUpdated());
@@ -883,6 +939,80 @@ final class DbTools {
         }
         result.add("games", games);
         return result;
+    }
+
+    private JsonObject batchMutate(JsonObject args) {
+        JsonElement operationsElement = args.get("operations");
+        if (operationsElement == null || !operationsElement.isJsonArray()) {
+            throw new ToolError("Missing required array: operations");
+        }
+        JsonArray operations = operationsElement.getAsJsonArray();
+        if (operations.isEmpty()) {
+            throw new ToolError("operations must contain at least one operation");
+        }
+
+        try {
+            return db.transactionAndSave(ignored -> {
+                JsonArray results = new JsonArray();
+                for (int i = 0; i < operations.size(); i++) {
+                    JsonElement element = operations.get(i);
+                    if (!element.isJsonObject()) {
+                        throw new ToolError(
+                            "Batch operation " + (i + 1) + " must be an object");
+                    }
+                    JsonObject operation = element.getAsJsonObject();
+                    String action = optString(operation, "action");
+                    if (action == null) {
+                        throw new ToolError(
+                            "Batch operation " + (i + 1) + " is missing action");
+                    }
+                    JsonObject operationResult;
+                    try {
+                        operationResult = mutateWithoutSave(action, operation);
+                        requireCompleteBatchOperation(action, operationResult);
+                    } catch (ToolError | IllegalArgumentException e) {
+                        throw new ToolError("Batch operation " + (i + 1) + " (" + action
+                            + ") failed: " + e.getMessage());
+                    }
+                    JsonObject item = new JsonObject();
+                    item.addProperty("action", action);
+                    item.add("result", operationResult);
+                    results.add(item);
+                }
+                JsonObject result = new JsonObject();
+                result.addProperty("operations_applied", results.size());
+                result.addProperty("game_count", db.gameCount());
+                result.add("results", results);
+                return result;
+            });
+        } catch (IOException e) {
+            throw new ToolError("Batch rolled back because saving failed: " + e.getMessage());
+        }
+    }
+
+    private JsonObject mutateWithoutSave(String action, JsonObject args) {
+        return switch (action) {
+            case "add_game" -> addGameWithoutSave(args);
+            case "import_pgn" -> importPgnWithoutSave(args);
+            case "delete_game" -> deleteGameWithoutSave(args);
+            case "set_tag" -> setTagWithoutSave(args);
+            case "update_game_tags" -> updateGameTagsWithoutSave(args);
+            default -> throw new ToolError("Unknown mutation action: " + action);
+        };
+    }
+
+    private static void requireCompleteBatchOperation(
+            String action, JsonObject result) {
+        if ("import_pgn".equals(action)
+                && result.get("games_rejected").getAsInt() > 0) {
+            throw new ToolError(
+                result.get("games_rejected").getAsInt() + " imported games were rejected");
+        }
+        if ("update_game_tags".equals(action)
+                && !result.getAsJsonArray("missing_game_ids").isEmpty()) {
+            throw new ToolError("Unknown game ids: "
+                + result.getAsJsonArray("missing_game_ids"));
+        }
     }
 
     private JsonObject exportPgn(JsonObject args) {
