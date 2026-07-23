@@ -97,36 +97,54 @@ public final class MoveNode {
         variations.add(firstMove);
     }
 
-    /** Deep, mutable copy of this move and its continuations. */
+    /**
+     * Deep, mutable copy of this move and its continuations.
+     *
+     * Iterative along the {@code next} chain so arbitrarily long lines never
+     * overflow the stack; recursion is only per variation nesting level,
+     * which the PGN reader bounds.
+     */
     public MoveNode copy() {
-        MoveNode copy = new MoveNode(san);
-        copy.commentBefore = commentBefore;
-        copy.comment = comment;
-        if (nags != null) {
-            copy.nags = new ArrayList<>(nags);
+        MoveNode head = copyNode(this);
+        MoveNode tail = head;
+        for (MoveNode source = next; source != null; source = source.next) {
+            MoveNode copied = copyNode(source);
+            tail.next = copied;
+            tail = copied;
         }
-        if (next != null) {
-            copy.next = next.copy();
+        return head;
+    }
+
+    /** Copy one node (annotations and variations, not the next chain). */
+    private static MoveNode copyNode(MoveNode source) {
+        MoveNode copy = new MoveNode(source.san);
+        copy.commentBefore = source.commentBefore;
+        copy.comment = source.comment;
+        if (source.nags != null) {
+            copy.nags = new ArrayList<>(source.nags);
         }
-        if (variations != null) {
-            copy.variations = new ArrayList<>(variations.size());
-            for (MoveNode variation : variations) {
+        if (source.variations != null) {
+            copy.variations = new ArrayList<>(source.variations.size());
+            for (MoveNode variation : source.variations) {
                 copy.variations.add(variation.copy());
             }
         }
         return copy;
     }
 
-    /** Make this move tree read-only. Used by the database for stored games. */
+    /**
+     * Make this move tree read-only. Used by the database for stored games.
+     * Iterative along the {@code next} chain (see {@link #copy()}).
+     */
     public void makeReadOnly() {
-        if (readOnly) return;
-        if (next != null) next.makeReadOnly();
-        if (variations != null) {
-            for (MoveNode variation : variations) {
-                variation.makeReadOnly();
+        for (MoveNode node = this; node != null && !node.readOnly; node = node.next) {
+            if (node.variations != null) {
+                for (MoveNode variation : node.variations) {
+                    variation.makeReadOnly();
+                }
             }
+            node.readOnly = true;
         }
-        readOnly = true;
     }
 
     public boolean isReadOnly() {

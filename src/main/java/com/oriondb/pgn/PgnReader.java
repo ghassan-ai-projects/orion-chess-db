@@ -253,7 +253,13 @@ public final class PgnReader {
                         tagEscape = false;
                     }
                     if (c == ']' && !inTagValue) inTag = false;
-                    if ((c == '\n' || c == '\r') && !inTagValue) inTag = false;
+                    if (c == '\n' || c == '\r') {
+                        // A tag pair never spans lines; an unclosed quote
+                        // must not leak tag state into following lines
+                        // (mirrors the lexer's unterminated-value recovery).
+                        inTag = false;
+                        inTagValue = false;
+                    }
                     continue;
                 }
 
@@ -437,12 +443,17 @@ public final class PgnReader {
             Game game, Map<String, String> tags, List<ParseError> errors) {}
 
         private ParsedSource parseGame() {
-            // Collect tags
+            // Collect tags. The game counter is bumped before the first
+            // token is lexed so warnings raised while lexing it (for
+            // example an unterminated tag value) name the right game.
             LinkedHashMap<String, String> tags = new LinkedHashMap<>();
-            Token token = nextToken();
-            if (token.type == TokenType.EOF) return null;
             gameNumber++;
             currentErrors = new ArrayList<>();
+            Token token = nextToken();
+            if (token.type == TokenType.EOF) {
+                gameNumber--;
+                return null;
+            }
 
             boolean sawAnything = false;
             while (token.type == TokenType.TAG) {
@@ -489,7 +500,18 @@ public final class PgnReader {
 
         private Game finishGame(LinkedHashMap<String, String> tags, MoveNode root,
                                 String gameComment, String terminator) {
-            Game game = new Game(tags, root);
+            // Set tags one by one so a value the model rejects drops that
+            // tag with a warning instead of aborting the whole parse.
+            Game game = new Game();
+            game.setRoot(root);
+            for (Map.Entry<String, String> tag : tags.entrySet()) {
+                try {
+                    game.setTag(tag.getKey(), tag.getValue());
+                } catch (IllegalArgumentException e) {
+                    warn("ignored invalid tag pair [" + tag.getKey() + " ...]: "
+                        + e.getMessage());
+                }
+            }
             game.setGameComment(gameComment);
 
             String tagResult = tags.get("Result");
@@ -520,6 +542,9 @@ public final class PgnReader {
             String terminator;       // mainline only
         }
 
+        /** Deepest supported variation nesting; deeper RAVs are consumed with a warning. */
+        private static final int MAX_VARIATION_DEPTH = 100;
+
         /**
          * Parse one line of moves. For the mainline, ends at a game
          * terminator or a structural boundary (new game's '[', EOF). For a
@@ -529,6 +554,10 @@ public final class PgnReader {
          * null when validation is off.
          */
         private LineResult parseLine(Board board, boolean mainline) {
+            return parseLine(board, mainline, 0);
+        }
+
+        private LineResult parseLine(Board board, boolean mainline, int depth) {
             LineResult result = new LineResult();
             MoveNode last = null;
             Board beforeLast = null;      // for variations attached to 'last'
@@ -579,9 +608,15 @@ public final class PgnReader {
                             consumeVariation();
                             break;
                         }
+                        if (depth >= MAX_VARIATION_DEPTH) {
+                            warn("variation nesting deeper than " + MAX_VARIATION_DEPTH
+                                + " levels ignored");
+                            consumeVariation();
+                            break;
+                        }
                         // A variation is an alternative to 'last', so it
                         // starts from the position before 'last'.
-                        LineResult variation = parseLine(beforeLast, false);
+                        LineResult variation = parseLine(beforeLast, false, depth + 1);
                         if (variation.first != null) {
                             if (variation.leadingComment != null) {
                                 variation.first.setCommentBefore(variation.leadingComment);
@@ -768,17 +803,40 @@ public final class PgnReader {
             }
             pos++; // '"'
             StringBuilder value = new StringBuilder();
-            while (pos < text.length() && text.charAt(pos) != '"') {
+            boolean closed = false;
+            while (pos < text.length()) {
                 char ch = text.charAt(pos);
-                if (ch == '\\' && pos + 1 < text.length()) {
+                if (ch == '"') {
+                    closed = true;
                     pos++;
-                    value.append(text.charAt(pos));
+                    break;
+                }
+                if (ch == '\n' || ch == '\r') {
+                    // A tag pair never spans lines (PGN spec); an unclosed
+                    // quote must not swallow the rest of the file.
+                    break;
+                }
+                if (ch == '\\' && pos + 1 < text.length()) {
+                    char escaped = text.charAt(pos + 1);
+                    if (escaped == '\n' || escaped == '\r') {
+                        break;
+                    }
+                    pos++;
+                    value.append(escaped);
                 } else {
                     value.append(ch);
                 }
                 pos++;
             }
-            if (pos < text.length()) pos++; // closing '"'
+            if (!closed) {
+                warn("unterminated tag value ignored ([" + key + " ...)");
+                // Drop the rest of the broken line so leftovers (for example
+                // a trailing backslash) are not tokenized as moves.
+                while (pos < text.length() && text.charAt(pos) != '\n') {
+                    pos++;
+                }
+                return nextToken();
+            }
             skipWhitespace();
             if (pos < text.length() && text.charAt(pos) == ']') {
                 pos++;

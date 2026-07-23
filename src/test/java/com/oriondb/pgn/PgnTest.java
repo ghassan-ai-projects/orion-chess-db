@@ -352,4 +352,74 @@ class PgnTest {
         Game again = new PgnReader().readString(written).games().get(0);
         assertEquals("The \"Great\" Open", again.event());
     }
+
+    @Test
+    void unterminatedTagValueDoesNotAbortTheParse() {
+        // Game 1's Event quote is never closed. The tag string must stop at
+        // the end of the line (a tag pair never spans lines), the tag is
+        // dropped with a warning, and both games survive.
+        String pgn = """
+            [Event "Unclosed
+            [Site "Q"]
+            [Result "*"]
+
+            1. e4 *
+
+            [Event "Fine Game"]
+            [Result "*"]
+
+            1. d4 *
+            """;
+        PgnReader.ParseResult result = new PgnReader().readString(pgn);
+        assertEquals(2, result.games().size());
+        Game first = result.games().get(0);
+        assertEquals("?", first.event(), "unterminated tag dropped");
+        assertEquals("Q", first.site(), "following tags still parse");
+        assertEquals(List.of("e4"), first.mainlineSans());
+        assertEquals("Fine Game", result.games().get(1).event());
+        assertEquals(List.of("d4"), result.games().get(1).mainlineSans());
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("unterminated tag")),
+            () -> result.warnings().toString());
+
+        // A trailing backslash must not let the escape consume the newline.
+        String escaped = "[Event \"Trailing\\\n[Result \"*\"]\n\n1. e4 *";
+        PgnReader.ParseResult escapedResult = new PgnReader().readString(escaped);
+        assertEquals(1, escapedResult.games().size());
+        assertEquals(List.of("e4"), escapedResult.games().get(0).mainlineSans());
+    }
+
+    @Test
+    void unterminatedTagValueStrictModeStillParsesTheGames() {
+        String pgn = """
+            [Event "Unclosed
+            [Result "*"]
+
+            1. e4 *
+            """;
+        PgnReader.ParseResult result =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readString(pgn);
+        assertEquals(1, result.games().size());
+        assertEquals(0, result.rejectedGames().size(),
+            "a dropped tag is a warning, not a game rejection");
+        assertEquals(List.of("e4"), result.games().get(0).mainlineSans());
+    }
+
+    @Test
+    void pathologicalVariationNestingDoesNotOverflow() {
+        // Each nested variation replays the same legal reply, so every level
+        // parses; without a depth cap this recursed once per '('.
+        int levels = 5_000;
+        String pgn = "[Result \"*\"]\n\n1. e4 e5 "
+            + "(1... d5 ".repeat(levels) + ")".repeat(levels) + " *";
+        PgnReader.ParseResult result = new PgnReader().readString(pgn);
+        assertEquals(1, result.games().size());
+        Game game = result.games().get(0);
+        assertEquals(List.of("e4", "e5"), game.mainlineSans());
+        // The first cap-worth of levels is preserved.
+        MoveNode e5 = game.root().next();
+        assertEquals(1, e5.variations().size());
+        assertEquals("d5", e5.variations().get(0).san());
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("nesting")),
+            () -> "expected a nesting warning, got: " + result.warnings());
+    }
 }
