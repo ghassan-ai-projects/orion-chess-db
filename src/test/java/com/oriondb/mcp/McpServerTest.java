@@ -220,6 +220,24 @@ class McpServerTest {
     }
 
     @Test
+    void strictImportErrorsAreStructured() {
+        JsonObject imported = payload(callTool("import_pgn",
+            "{\"pgn_text\":\"[White \\\"Bad\\\"]\\n[Black \\\"Move\\\"]\\n"
+                + "[Result \\\"*\\\"]\\n\\n1. e4 e5 2. Nf6 *\"}"));
+        assertEquals(0, imported.get("games_added").getAsInt());
+        assertEquals(1, imported.get("games_rejected").getAsInt());
+        JsonObject error = imported.getAsJsonArray("errors").get(0).getAsJsonObject();
+        assertEquals(1, error.get("game_number").getAsInt());
+        assertEquals("ILLEGAL_MAINLINE_MOVE", error.get("code").getAsString());
+
+        JsonObject add = callTool("add_game",
+            "{\"pgn_text\":\"[Result \\\"*\\\"]\\n\\n1. e4 e5 2. Nf6 *\"}");
+        assertTrue(add.get("isError").getAsBoolean());
+        assertTrue(add.getAsJsonArray("content").get(0).getAsJsonObject()
+            .get("text").getAsString().contains("rejected"));
+    }
+
+    @Test
     void dbStatsAndDuplicatesTools() {
         JsonObject stats = payload(callTool("db_stats", "{}"));
         assertEquals(6, stats.get("game_count").getAsInt());

@@ -55,13 +55,33 @@ public final class Database implements AutoCloseable {
     private static final Pattern NEXT_ID_HEADER =
         Pattern.compile("(?m)^% OrionDB NextId ([1-9][0-9]*)\\s*$");
 
+    /** Machine-readable reason an individual source game was rejected. */
+    public record ImportError(
+        int gameNumber,
+        String white,
+        String black,
+        String code,
+        String message
+    ) {}
+
     /** Outcome of a PGN import. */
-    public record ImportReport(int gamesAdded, int duplicatesSkipped, List<String> warnings) {
+    public record ImportReport(
+        int gamesAdded,
+        int duplicatesSkipped,
+        int gamesRejected,
+        List<String> warnings,
+        List<ImportError> errors
+    ) {
+        public ImportReport(int gamesAdded, int duplicatesSkipped, List<String> warnings) {
+            this(gamesAdded, duplicatesSkipped, 0, warnings, List.of());
+        }
+
         public ImportReport {
-            if (gamesAdded < 0 || duplicatesSkipped < 0) {
+            if (gamesAdded < 0 || duplicatesSkipped < 0 || gamesRejected < 0) {
                 throw new IllegalArgumentException("Import counts must not be negative");
             }
             warnings = List.copyOf(Objects.requireNonNull(warnings, "warnings"));
+            errors = List.copyOf(Objects.requireNonNull(errors, "errors"));
         }
     }
 
@@ -104,7 +124,8 @@ public final class Database implements AutoCloseable {
     private int nextId = 1;
     private boolean dirty;
     private boolean saveOnClose = true;
-    private ImportReport lastImportReport = new ImportReport(0, 0, List.of());
+    private ImportReport lastImportReport =
+        new ImportReport(0, 0, 0, List.of(), List.of());
     /** SHA-256 of the file state loaded or last saved; null means it did not exist. */
     private String persistedFingerprint;
 
@@ -264,27 +285,46 @@ public final class Database implements AutoCloseable {
      * computed on all cores.
      */
     public synchronized ImportReport importPgn(String pgnText) {
-        PgnReader.ParseResult parsed = new PgnReader().readString(pgnText);
+        PgnReader.ParseResult parsed =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readString(pgnText);
         List<String> warnings = new ArrayList<>(parsed.warnings());
+        List<ImportError> errors = new ArrayList<>();
+        for (PgnReader.RejectedGame rejected : parsed.rejectedGames()) {
+            String white = rejected.tags().getOrDefault("White", "?");
+            String black = rejected.tags().getOrDefault("Black", "?");
+            for (PgnReader.ParseError error : rejected.errors()) {
+                errors.add(new ImportError(
+                    rejected.gameNumber(), white, black, error.code(), error.message()));
+            }
+        }
 
         // The replay/analysis work is independent per game: parallelize it,
         // preserving encounter order, then insert sequentially.
-        record Built(Game game, GameData data, String error) {}
-        List<Built> built = parsed.games().parallelStream()
-            .map(game -> {
+        record Built(int gameNumber, Game game, GameData data, String error) {}
+        List<Built> built = parsed.parsedGames().parallelStream()
+            .map(parsedGame -> {
+                Game game = parsedGame.game();
                 try {
-                    return new Built(game, GameData.build(game), null);
+                    return new Built(
+                        parsedGame.gameNumber(), game, GameData.build(game), null);
                 } catch (IllegalArgumentException e) {
-                    return new Built(game, null, e.getMessage());
+                    return new Built(parsedGame.gameNumber(), game, null, e.getMessage());
                 }
             })
             .toList();
 
         int added = 0;
         int duplicates = 0;
+        int rejected = parsed.rejectedGames().size();
         for (Built b : built) {
             if (b.error() != null) {
-                warnings.add("skipped unreplayable game (" + b.game() + "): " + b.error());
+                rejected++;
+                String message = "game " + b.gameNumber() + ": skipped unreplayable game ("
+                    + b.game() + "): " + b.error();
+                warnings.add(message);
+                errors.add(new ImportError(
+                    b.gameNumber(), b.game().white(), b.game().black(),
+                    "REPLAY_FAILED", b.error()));
                 continue;
             }
             if (isDuplicate(b.game())) {
@@ -294,7 +334,8 @@ public final class Database implements AutoCloseable {
             add(b.game().copy(), b.data(), warnings);
             added++;
         }
-        lastImportReport = new ImportReport(added, duplicates, warnings);
+        lastImportReport = new ImportReport(
+            added, duplicates, rejected, warnings, errors);
         return lastImportReport;
     }
 

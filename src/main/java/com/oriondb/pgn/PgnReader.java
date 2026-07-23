@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -27,25 +28,63 @@ import java.util.Objects;
  * tag-value escapes, and games with FEN/SetUp start positions.
  *
  * With validation enabled (the default), every move is checked against the
- * legal move generator and rewritten in canonical SAN. Illegal mainline
- * moves truncate the game at that point with a warning; illegal variation
- * moves truncate that variation. Games that fail entirely are skipped, and
- * parsing always continues with the next game.
+ * legal move generator and rewritten in canonical SAN. Lenient mode truncates
+ * illegal lines with warnings. Strict mode rejects a whole game for an
+ * invalid FEN or illegal mainline and reports structured errors while parsing
+ * continues with the next game.
  */
 public final class PgnReader {
 
-    /** Result of a parse: the games plus any per-game warnings. */
+    public enum ValidationMode { NONE, LENIENT, STRICT }
+
+    /** One machine-readable reason that a strict parse rejected a game. */
+    public record ParseError(String code, String message) {
+        public ParseError {
+            Objects.requireNonNull(code, "code");
+            Objects.requireNonNull(message, "message");
+        }
+    }
+
+    /** A source game rejected by strict validation. */
+    public record RejectedGame(
+        int gameNumber,
+        Map<String, String> tags,
+        List<ParseError> errors
+    ) {
+        public RejectedGame {
+            tags = Map.copyOf(tags);
+            errors = List.copyOf(errors);
+        }
+    }
+
+    /** An accepted game paired with its 1-based ordinal in the source. */
+    public record ParsedGame(int gameNumber, Game game) {}
+
+    /** Result of a parse: accepted games, rejections, and compatibility warnings. */
     public static final class ParseResult {
-        private final List<Game> games;
+        private final List<ParsedGame> parsedGames;
+        private final List<RejectedGame> rejectedGames;
         private final List<String> warnings;
 
-        ParseResult(List<Game> games, List<String> warnings) {
-            this.games = List.copyOf(games);
+        ParseResult(
+                List<ParsedGame> parsedGames,
+                List<RejectedGame> rejectedGames,
+                List<String> warnings) {
+            this.parsedGames = List.copyOf(parsedGames);
+            this.rejectedGames = List.copyOf(rejectedGames);
             this.warnings = List.copyOf(warnings);
         }
 
         public List<Game> games() {
-            return games;
+            return parsedGames.stream().map(ParsedGame::game).toList();
+        }
+
+        public List<ParsedGame> parsedGames() {
+            return parsedGames;
+        }
+
+        public List<RejectedGame> rejectedGames() {
+            return rejectedGames;
         }
 
         public List<String> warnings() {
@@ -53,14 +92,18 @@ public final class PgnReader {
         }
     }
 
-    private final boolean validate;
+    private final ValidationMode validationMode;
 
     public PgnReader() {
-        this(true);
+        this(ValidationMode.LENIENT);
     }
 
     public PgnReader(boolean validate) {
-        this.validate = validate;
+        this(validate ? ValidationMode.LENIENT : ValidationMode.NONE);
+    }
+
+    public PgnReader(ValidationMode validationMode) {
+        this.validationMode = Objects.requireNonNull(validationMode, "validationMode");
     }
 
     public ParseResult readFile(Path path) throws IOException {
@@ -101,7 +144,7 @@ public final class PgnReader {
     }
 
     public ParseResult readString(String pgn) {
-        return new Parser(Objects.requireNonNull(pgn, "pgn"), validate).parseAll();
+        return new Parser(Objects.requireNonNull(pgn, "pgn"), validationMode).parseAll();
     }
 
     // ==================================================================
@@ -141,13 +184,16 @@ public final class PgnReader {
     private static final class Parser {
         private final String text;
         private final boolean validate;
+        private final boolean strict;
         private int pos;
-        private final List<Game> games = new ArrayList<>();
+        private final List<ParsedGame> games = new ArrayList<>();
+        private final List<RejectedGame> rejectedGames = new ArrayList<>();
         private final List<String> warnings = new ArrayList<>();
+        private List<ParseError> currentErrors = List.of();
         private Token pushedBack;
         private int gameNumber;          // 1-based ordinal in the file, for warnings
 
-        Parser(String pgn, boolean validate) {
+        Parser(String pgn, ValidationMode validationMode) {
             // Strip escape lines (lines whose first character is '%').
             if (pgn.indexOf('%') != -1) {
                 StringBuilder sb = new StringBuilder(pgn.length());
@@ -159,32 +205,48 @@ public final class PgnReader {
                 pgn = sb.toString();
             }
             this.text = pgn;
-            this.validate = validate;
+            this.validate = validationMode != ValidationMode.NONE;
+            this.strict = validationMode == ValidationMode.STRICT;
         }
 
         ParseResult parseAll() {
             while (true) {
-                Game game = parseGame();
-                if (game == null) break;
-                games.add(game);
+                ParsedSource parsed = parseGame();
+                if (parsed == null) break;
+                if (strict && !parsed.errors().isEmpty()) {
+                    rejectedGames.add(new RejectedGame(
+                        gameNumber, parsed.tags(), parsed.errors()));
+                } else {
+                    games.add(new ParsedGame(gameNumber, parsed.game()));
+                }
             }
-            return new ParseResult(games, warnings);
+            return new ParseResult(games, rejectedGames, warnings);
         }
 
         private void warn(String message) {
             warnings.add("game " + gameNumber + ": " + message);
         }
 
+        private void reject(String code, String message) {
+            if (currentErrors.isEmpty()) currentErrors = new ArrayList<>();
+            currentErrors.add(new ParseError(code, message));
+            warn(message);
+        }
+
         // --------------------------------------------------------------
         // Game assembly
         // --------------------------------------------------------------
 
-        private Game parseGame() {
+        private record ParsedSource(
+            Game game, Map<String, String> tags, List<ParseError> errors) {}
+
+        private ParsedSource parseGame() {
             // Collect tags
             LinkedHashMap<String, String> tags = new LinkedHashMap<>();
             Token token = nextToken();
             if (token.type == TokenType.EOF) return null;
             gameNumber++;
+            currentErrors = new ArrayList<>();
 
             boolean sawAnything = false;
             while (token.type == TokenType.TAG) {
@@ -193,7 +255,8 @@ public final class PgnReader {
                 token = nextToken();
             }
             if (token.type == TokenType.EOF) {
-                return sawAnything ? finishGame(tags, null, null, "*") : null;
+                if (!sawAnything) return null;
+                return source(finishGame(tags, null, null, "*"), tags);
             }
             pushBack(token);
 
@@ -205,7 +268,12 @@ public final class PgnReader {
                     try {
                         startBoard = Board.fromFen(fen);
                     } catch (IllegalArgumentException e) {
-                        warn("invalid FEN tag, treating moves as unverified: " + e.getMessage());
+                        String message = "invalid FEN tag: " + e.getMessage();
+                        if (strict) {
+                            reject("INVALID_FEN", message);
+                        } else {
+                            warn(message + "; treating moves as unverified");
+                        }
                     }
                 } else {
                     startBoard = Board.startingPosition();
@@ -214,7 +282,13 @@ public final class PgnReader {
 
             // Movetext
             LineResult line = parseLine(startBoard, true);
-            return finishGame(tags, line.first, line.leadingComment, line.terminator);
+            return source(
+                finishGame(tags, line.first, line.leadingComment, line.terminator), tags);
+        }
+
+        private ParsedSource source(Game game, Map<String, String> sourceTags) {
+            return new ParsedSource(game, new LinkedHashMap<>(sourceTags),
+                List.copyOf(currentErrors));
         }
 
         private Game finishGame(LinkedHashMap<String, String> tags, MoveNode root,
@@ -350,10 +424,15 @@ public final class PgnReader {
                         if (board != null) {
                             int move = board.parseSan(san);
                             if (move == Move.NONE) {
-                                warn("illegal or unparseable move '" + san + "' at "
-                                    + describePly(board) + (mainline
+                                String message = "illegal or unparseable move '" + san + "' at "
+                                    + describePly(board);
+                                if (mainline && strict) {
+                                    reject("ILLEGAL_MAINLINE_MOVE", message);
+                                } else {
+                                    warn(message + (mainline
                                         ? "; rest of game discarded"
                                         : "; rest of variation discarded"));
+                                }
                                 if (mainline) {
                                     skipping = true;
                                     break;

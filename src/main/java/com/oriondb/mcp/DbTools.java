@@ -768,16 +768,37 @@ final class DbTools {
         JsonObject result = new JsonObject();
         result.addProperty("games_added", report.gamesAdded());
         result.addProperty("duplicates_skipped", report.duplicatesSkipped());
+        result.addProperty("games_rejected", report.gamesRejected());
         result.addProperty("game_count", db.gameCount());
         JsonArray warnings = new JsonArray();
         for (String warning : report.warnings()) warnings.add(warning);
         result.add("warnings", warnings);
+        JsonArray errors = new JsonArray();
+        for (Database.ImportError error : report.errors()) {
+            JsonObject item = new JsonObject();
+            item.addProperty("game_number", error.gameNumber());
+            item.addProperty("white", error.white());
+            item.addProperty("black", error.black());
+            item.addProperty("code", error.code());
+            item.addProperty("message", error.message());
+            errors.add(item);
+        }
+        result.add("errors", errors);
         return result;
     }
 
     private JsonObject addGame(JsonObject args) {
         String text = reqString(args, "pgn_text");
-        var parsed = new com.oriondb.pgn.PgnReader().readString(text);
+        var parsed = new com.oriondb.pgn.PgnReader(
+            com.oriondb.pgn.PgnReader.ValidationMode.STRICT).readString(text);
+        if (!parsed.rejectedGames().isEmpty()) {
+            var rejection = parsed.rejectedGames().get(0);
+            String reason = rejection.errors().isEmpty()
+                ? "strict validation failed"
+                : rejection.errors().get(0).message();
+            throw new ToolError(
+                "Game " + rejection.gameNumber() + " rejected: " + reason);
+        }
         if (parsed.games().size() != 1) {
             throw new ToolError("Expected exactly one game, found " + parsed.games().size());
         }

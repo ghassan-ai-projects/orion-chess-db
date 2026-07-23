@@ -34,8 +34,8 @@ nothing to migrate.
 
 - **Correct chess.** Full legal move generation (pins, checks, castling
   legality, en passant), validated by perft against reference positions.
-  Every imported move is replayed and normalized; illegal games are flagged,
-  never silently corrupted.
+  Every imported move is replayed and normalized; an invalid FEN or illegal
+  mainline rejects the whole game with a structured source-game error.
 - **Lossless PGN.** Variations, comments, NAGs, `%` escape lines, glued move
   numbers, `0-0` castling, Latin-1 legacy files, FEN set-up games — read,
   preserved, and written back in clean export format.
@@ -152,7 +152,7 @@ claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygam
 | `position_search` | Games reaching a FEN position (+ where and what came next) |
 | `player_report` | Dossier: W/D/L, performance, repertoire, best wins |
 | `head_to_head` | Two players' lifetime score, split by color |
-| `import_pgn` | Import text or a file; validates, dedupes, classifies |
+| `import_pgn` | Strict import with deduplication and structured per-game errors |
 | `add_game` | Add a single game, returns its id |
 | `delete_game` | Remove a game |
 | `set_tag` | Edit or remove a PGN tag |

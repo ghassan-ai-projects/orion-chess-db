@@ -152,6 +152,51 @@ class PgnTest {
     }
 
     @Test
+    void strictModeRejectsIllegalGameAndContinues() {
+        String pgn = """
+            [White "Bad"]
+            [Black "Move"]
+            [Result "*"]
+
+            1. e4 e5 2. Nf6 *
+
+            [White "Good"]
+            [Black "Game"]
+            [Result "*"]
+
+            1. d4 d5 *
+            """;
+        PgnReader.ParseResult result =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readString(pgn);
+
+        assertEquals(1, result.games().size());
+        assertEquals("Good", result.games().get(0).white());
+        assertEquals(2, result.parsedGames().get(0).gameNumber());
+        assertEquals(1, result.rejectedGames().size());
+        PgnReader.RejectedGame rejected = result.rejectedGames().get(0);
+        assertEquals(1, rejected.gameNumber());
+        assertEquals("Bad", rejected.tags().get("White"));
+        assertEquals("ILLEGAL_MAINLINE_MOVE", rejected.errors().get(0).code());
+    }
+
+    @Test
+    void strictModeRejectsInvalidFen() {
+        PgnReader.ParseResult result =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readString("""
+                [White "Bad FEN"]
+                [Result "*"]
+                [SetUp "1"]
+                [FEN "not a fen"]
+
+                1. e4 *
+                """);
+
+        assertTrue(result.games().isEmpty());
+        assertEquals("INVALID_FEN",
+            result.rejectedGames().get(0).errors().get(0).code());
+    }
+
+    @Test
     void illegalVariationDropsOnlyVariation() {
         String pgn = """
             [Result "*"]

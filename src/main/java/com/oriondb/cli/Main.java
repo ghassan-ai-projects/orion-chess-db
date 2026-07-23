@@ -175,8 +175,10 @@ public final class Main {
                 long start = System.currentTimeMillis();
                 Database.ImportReport report = db.importFile(Path.of(file));
                 long ms = System.currentTimeMillis() - start;
-                System.out.printf("%s: %d games imported, %d duplicates skipped (%d ms)%n",
-                    file, report.gamesAdded(), report.duplicatesSkipped(), ms);
+                System.out.printf(
+                    "%s: %d imported, %d duplicates skipped, %d rejected (%d ms)%n",
+                    file, report.gamesAdded(), report.duplicatesSkipped(),
+                    report.gamesRejected(), ms);
                 for (String warning : report.warnings()) {
                     System.out.println("  warning: " + warning);
                 }
