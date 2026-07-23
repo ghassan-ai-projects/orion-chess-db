@@ -5,7 +5,9 @@ import com.oriondb.chess.Move;
 import com.oriondb.model.Game;
 import com.oriondb.model.MoveNode;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -107,7 +109,21 @@ public final class PgnReader {
     }
 
     public ParseResult readFile(Path path) throws IOException {
-        return readString(readFileText(path));
+        try {
+            return readFile(path, StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT));
+        } catch (CharacterCodingException e) {
+            return readFile(path, StandardCharsets.ISO_8859_1.newDecoder());
+        }
+    }
+
+    private ParseResult readFile(
+            Path path, java.nio.charset.CharsetDecoder decoder) throws IOException {
+        try (Reader reader = new BufferedReader(new InputStreamReader(
+                Files.newInputStream(path), decoder))) {
+            return read(reader);
+        }
     }
 
     /**
@@ -134,17 +150,188 @@ public final class PgnReader {
     }
 
     public ParseResult read(Reader reader) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        char[] buf = new char[8192];
-        int n;
-        while ((n = reader.read(buf)) != -1) {
-            sb.append(buf, 0, n);
+        Objects.requireNonNull(reader, "reader");
+        List<ParsedGame> parsedGames = new ArrayList<>();
+        List<RejectedGame> rejectedGames = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        StreamingGameChunks chunks = new StreamingGameChunks(reader);
+        int gamesSeen = 0;
+        for (String chunk; (chunk = chunks.next()) != null; ) {
+            Parser parser = new Parser(chunk, validationMode, gamesSeen);
+            ParseResult partial = parser.parseAll();
+            parsedGames.addAll(partial.parsedGames());
+            rejectedGames.addAll(partial.rejectedGames());
+            warnings.addAll(partial.warnings());
+            gamesSeen = parser.gameNumber();
         }
-        return readString(sb.toString());
+        return new ParseResult(parsedGames, rejectedGames, warnings);
     }
 
     public ParseResult readString(String pgn) {
         return new Parser(Objects.requireNonNull(pgn, "pgn"), validationMode).parseAll();
+    }
+
+    /**
+     * Splits a character stream at top-level game boundaries. Only one source
+     * game is retained at a time; the existing parser still handles the full
+     * PGN grammar within that bounded chunk.
+     */
+    private static final class StreamingGameChunks {
+        private static final int NONE = -2;
+
+        private final Reader reader;
+        private final char[] input = new char[8192];
+        private int inputPosition;
+        private int inputLimit;
+        private int pending = NONE;
+        private boolean firstCharacter = true;
+        private boolean lineStart = true;
+
+        StreamingGameChunks(Reader reader) {
+            this.reader = reader;
+        }
+
+        String next() throws IOException {
+            StringBuilder chunk = new StringBuilder(4096);
+            StringBuilder word = new StringBuilder(32);
+            boolean hasContent = false;
+            boolean sawMovetext = false;
+            boolean inTag = false;
+            boolean inTagValue = false;
+            boolean tagEscape = false;
+            boolean inBraceComment = false;
+            boolean inLineComment = false;
+            boolean inEscapeLine = false;
+            int variationDepth = 0;
+
+            while (true) {
+                int value = read();
+                if (value == -1) {
+                    if (!word.isEmpty()) {
+                        sawMovetext = true;
+                    }
+                    return hasContent || sawMovetext ? chunk.toString() : null;
+                }
+                char c = (char) value;
+                if (firstCharacter) {
+                    firstCharacter = false;
+                    if (c == '\uFEFF') continue;
+                }
+
+                boolean wasLineStart = lineStart;
+                lineStart = c == '\n' || c == '\r';
+
+                if (inEscapeLine) {
+                    if (c == '\n' || c == '\r') {
+                        inEscapeLine = false;
+                    }
+                    continue;
+                }
+                if (wasLineStart && c == '%') {
+                    inEscapeLine = true;
+                    continue;
+                }
+                if (inLineComment) {
+                    append(chunk, c);
+                    hasContent = true;
+                    if (c == '\n' || c == '\r') inLineComment = false;
+                    continue;
+                }
+                if (inBraceComment) {
+                    append(chunk, c);
+                    hasContent = true;
+                    if (c == '}') inBraceComment = false;
+                    continue;
+                }
+                if (inTag) {
+                    append(chunk, c);
+                    hasContent = true;
+                    if (inTagValue && c == '\\' && !tagEscape) {
+                        tagEscape = true;
+                    } else {
+                        if (c == '"' && !tagEscape) inTagValue = !inTagValue;
+                        tagEscape = false;
+                    }
+                    if (c == ']' && !inTagValue) inTag = false;
+                    if ((c == '\n' || c == '\r') && !inTagValue) inTag = false;
+                    continue;
+                }
+
+                if (isBoundary(c)) {
+                    if (!word.isEmpty()) {
+                        boolean terminator = isTerminator(word);
+                        word.setLength(0);
+                        sawMovetext = true;
+                        if (terminator && variationDepth == 0) {
+                            pending = c;
+                            return chunk.toString();
+                        }
+                    }
+                    if (c == '[') {
+                        if (sawMovetext && hasContent) {
+                            pending = c;
+                            return chunk.toString();
+                        }
+                        inTag = true;
+                        inTagValue = false;
+                        tagEscape = false;
+                    } else if (c == '{') {
+                        inBraceComment = true;
+                    } else if (c == ';') {
+                        inLineComment = true;
+                    } else if (c == '(') {
+                        variationDepth++;
+                    } else if (c == ')' && variationDepth > 0) {
+                        variationDepth--;
+                    }
+                    append(chunk, c);
+                    if (!Character.isWhitespace(c)) hasContent = true;
+                } else {
+                    append(chunk, c);
+                    word.append(c);
+                    hasContent = true;
+                }
+            }
+        }
+
+        private int read() throws IOException {
+            if (pending != NONE) {
+                int value = pending;
+                pending = NONE;
+                return value;
+            }
+            if (inputPosition >= inputLimit) {
+                do {
+                    inputLimit = reader.read(input);
+                } while (inputLimit == 0);
+                inputPosition = 0;
+                if (inputLimit == -1) return -1;
+            }
+            return input[inputPosition++];
+        }
+
+        private static void append(StringBuilder chunk, char c) {
+            chunk.append(c);
+        }
+
+        private static boolean isBoundary(char c) {
+            return Character.isWhitespace(c) || c == '(' || c == ')' || c == '{'
+                || c == '}' || c == ';' || c == '$' || c == '[' || c == ']';
+        }
+
+        private static boolean isTerminator(CharSequence word) {
+            return contentEquals(word, "1-0") || contentEquals(word, "0-1")
+                || contentEquals(word, "1/2-1/2") || contentEquals(word, "1/2")
+                || contentEquals(word, "*");
+        }
+
+        private static boolean contentEquals(CharSequence actual, String expected) {
+            if (actual.length() != expected.length()) return false;
+            for (int i = 0; i < actual.length(); i++) {
+                if (actual.charAt(i) != expected.charAt(i)) return false;
+            }
+            return true;
+        }
     }
 
     // ==================================================================
@@ -194,6 +381,10 @@ public final class PgnReader {
         private int gameNumber;          // 1-based ordinal in the file, for warnings
 
         Parser(String pgn, ValidationMode validationMode) {
+            this(pgn, validationMode, 0);
+        }
+
+        Parser(String pgn, ValidationMode validationMode, int gamesAlreadyParsed) {
             // Strip escape lines (lines whose first character is '%').
             if (pgn.indexOf('%') != -1) {
                 StringBuilder sb = new StringBuilder(pgn.length());
@@ -207,6 +398,11 @@ public final class PgnReader {
             this.text = pgn;
             this.validate = validationMode != ValidationMode.NONE;
             this.strict = validationMode == ValidationMode.STRICT;
+            this.gameNumber = gamesAlreadyParsed;
+        }
+
+        int gameNumber() {
+            return gameNumber;
         }
 
         ParseResult parseAll() {

@@ -15,7 +15,7 @@ nothing to migrate.
 │                      oriondb.jar                        │
 │                                                         │
 │  CLI (humans)                    MCP server (agents)    │
-│  search / explorer / player      14 tools over stdio    │
+│  search / explorer / player      MCP tools over stdio   │
 │        └──────────────┬──────────────┘                  │
 │                  Search engine                          │
 │   metadata · positions · material · tactics · text      │
@@ -38,7 +38,8 @@ nothing to migrate.
   mainline rejects the whole game with a structured source-game error.
 - **Lossless PGN.** Variations, comments, NAGs, `%` escape lines, glued move
   numbers, `0-0` castling, Latin-1 legacy files, FEN set-up games — read,
-  preserved, and written back in clean export format.
+  preserved, and written back in clean export format. File imports and saves
+  stream instead of constructing a second full-file copy in memory.
 - **Transposition-aware position search.** Zobrist hashing means "find games
   reaching this position" works regardless of move order.
 - **Opening explorer.** For any position: every continuation with game counts,
@@ -58,7 +59,8 @@ nothing to migrate.
   (IQP, passed pawns, ...), date/Elo/event/result filters, sorting, pagination.
 - **First-class game tags.** Categorize one game or update many at once, then
   search for all/any tags or exclude tags. Values are case-insensitive and
-  persist in the portable `OrionTags` PGN header.
+  persist in the portable `OrionTags` PGN header. Exact tag filters use an
+  in-memory inverted index.
 - **Stable game identity.** Database-assigned ids survive deletes and restarts
   through the portable `OrionDBId` PGN tag.
 - **Zero-infrastructure.** One 500 KB jar, one PGN file. Durable atomic saves
@@ -257,6 +259,10 @@ sample database.
   refuse to overwrite a backing file changed since it was opened. An optional
   sidecar-file lock coordinates writers across processes and remains valid
   when the PGN inode is atomically replaced.
+- **Indexes follow measured queries.** Positions and categorical tags have
+  inverted indexes. Substring metadata filters remain scans because exact
+  indexes do not serve their semantics at the intended collection size. See
+  [the repeatable performance profile](docs/performance.md).
 - **Mutation is explicit.** Games returned by `game`, `games`, and searches are
   read-only. Use `copy()` plus `replace(id, game)` for an atomic validated edit,
   or `setTag` for metadata. Read methods return snapshots or defensive copies,
@@ -286,7 +292,7 @@ src/main/java/com/oriondb/
   analysis/   Material signatures, pawn features, tactical motifs
   db/         Database (PGN persistence, indexes), GameData
   search/     Search, OpeningExplorer, PlayerStats, Duplicates
-  mcp/        McpServer (stdio JSON-RPC), DbTools (14 tools)
+  mcp/        McpServer (stdio JSON-RPC), DbTools (tool catalog)
   cli/        Main
 ```
 

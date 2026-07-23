@@ -90,6 +90,34 @@ class DatabasePerfTest {
                     count, elapsedMs, count * 1000.0 / Math.max(1, elapsedMs));
                 // Generous bound: ~300 synthetic games should open in seconds.
                 assertTrue(elapsedMs < 30_000, "open took " + elapsedMs + " ms");
+
+                List<Integer> taggedIds = db.games().stream()
+                    .map(Game::id)
+                    .filter(id -> id % 10 == 0)
+                    .toList();
+                List<Integer> controlExcludedIds = db.games().stream()
+                    .map(Game::id)
+                    .filter(id -> id % 10 != 0)
+                    .toList();
+                db.addGameTags(taggedIds, List.of("benchmark"));
+                db.addGameTags(controlExcludedIds, List.of("control-excluded"));
+                int queryCount = Integer.getInteger("oriondb.perf.queries", 200);
+                long queryStart = System.nanoTime();
+                for (int i = 0; i < queryCount; i++) {
+                    assertEquals(taggedIds.size(), db.search().tag("benchmark").count());
+                }
+                long queryMs = (System.nanoTime() - queryStart) / 1_000_000;
+                System.out.printf("%d indexed tag queries in %d ms%n", queryCount, queryMs);
+                assertTrue(queryMs < 10_000, "tag queries took " + queryMs + " ms");
+
+                long scanStart = System.nanoTime();
+                for (int i = 0; i < queryCount; i++) {
+                    assertEquals(
+                        taggedIds.size(),
+                        db.search().withoutTag("control-excluded").count());
+                }
+                long scanMs = (System.nanoTime() - scanStart) / 1_000_000;
+                System.out.printf("%d full-scan tag queries in %d ms%n", queryCount, scanMs);
             }
         } finally {
             Files.deleteIfExists(file);

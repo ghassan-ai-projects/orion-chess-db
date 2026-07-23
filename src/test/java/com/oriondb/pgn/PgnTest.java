@@ -3,7 +3,13 @@ package com.oriondb.pgn;
 import com.oriondb.model.Game;
 import com.oriondb.model.MoveNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -117,6 +123,60 @@ class PgnTest {
         assertEquals("One", games.get(0).white());
         assertEquals("Two", games.get(1).white());
         assertEquals(List.of("d4", "d5"), games.get(1).mainlineSans());
+    }
+
+    @Test
+    void streamingReaderPreservesBoundariesErrorsAndOrdinals() throws Exception {
+        String pgn = """
+            [White "Bad ] Name"]
+            [Black "Move"]
+            [Result "*"]
+
+            {Text containing 1-0 and [Event "not a tag"].}
+            1. e4 e5 2. Nf6
+
+            [White "Good"]
+            [Black "Game"]
+            [Result "*"]
+
+            1. d4 d5 *
+            """;
+        PgnReader reader = new PgnReader(PgnReader.ValidationMode.STRICT);
+        PgnReader.ParseResult streamed = reader.read(new StringReader(pgn));
+
+        assertEquals(1, streamed.rejectedGames().size());
+        assertEquals(1, streamed.rejectedGames().get(0).gameNumber());
+        assertEquals("Bad ] Name", streamed.rejectedGames().get(0).tags().get("White"));
+        assertEquals(1, streamed.games().size());
+        assertEquals(2, streamed.parsedGames().get(0).gameNumber());
+        assertEquals("Good", streamed.games().get(0).white());
+    }
+
+    @Test
+    void fileReaderFallsBackToLatin1WithoutLoadingTheWholeFile(
+            @TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("latin1.pgn");
+        String pgn = """
+            [White "José"]
+            [Black "Müller"]
+            [Result "*"]
+
+            1. e4 *
+            """;
+        Files.write(file, pgn.getBytes(StandardCharsets.ISO_8859_1));
+
+        Game game = new PgnReader().readFile(file).games().get(0);
+        assertEquals("José", game.white());
+        assertEquals("Müller", game.black());
+    }
+
+    @Test
+    void writerCanStreamTheSameCanonicalOutput() throws Exception {
+        List<Game> games = new PgnReader().readString(ANNOTATED).games();
+        StringWriter streamed = new StringWriter();
+        new PgnWriter().write(games, streamed);
+
+        assertEquals(new PgnWriter().write(games), streamed.toString());
     }
 
     @Test

@@ -46,6 +46,7 @@ class DatabaseTransactionTest {
         assertThrows(IntentionalFailure.class, () -> db.transaction(tx -> {
             assertTrue(tx.delete(alpha));
             assertTrue(tx.setTag(gamma, "Annotator", "rolled back"));
+            assertTrue(tx.addGameTags(gamma, "rolled-back-tag"));
             allocated[0] = tx.add(game("""
                 [White "Temporary"]
                 [Black "Game"]
@@ -59,6 +60,7 @@ class DatabaseTransactionTest {
         assertEquals(2, db.gameCount());
         assertEquals("Alpha", db.game(alpha).white());
         assertNull(db.game(gamma).tag("Annotator"));
+        assertEquals(0, db.search().tag("rolled-back-tag").count());
         assertEquals(1, db.positionEntries(e4).length);
         assertEquals(allocated[0], db.add(game("""
             [White "Permanent"]

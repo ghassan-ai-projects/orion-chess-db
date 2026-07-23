@@ -8,6 +8,7 @@ import com.oriondb.search.OpeningExplorer;
 import com.oriondb.search.PlayerStats;
 import com.oriondb.search.Search;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.FileChannel;
@@ -28,6 +29,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -149,6 +151,8 @@ public final class Database implements AutoCloseable {
     private final Map<Long, EntryList> positionIndex = new HashMap<>();
     /** Move-sequence hash -> candidate ids for exact duplicate checks. */
     private final Map<Long, List<Integer>> duplicateIndex = new HashMap<>();
+    /** Normalized categorical tag -> game ids carrying it. */
+    private final Map<String, LinkedHashSet<Integer>> gameTagIndex = new HashMap<>();
     private int nextId = 1;
     private boolean dirty;
     private boolean saveOnClose = true;
@@ -196,14 +200,15 @@ public final class Database implements AutoCloseable {
             }
             if (Files.exists(normalized)) {
                 String beforeRead = fingerprint(normalized);
-                String pgn = PgnReader.readFileText(normalized);
+                PgnReader.ParseResult parsed =
+                    new PgnReader(PgnReader.ValidationMode.STRICT).readFile(normalized);
+                int persistedNextId = readNextId(normalized);
                 String afterRead = fingerprint(normalized);
                 if (!Objects.equals(beforeRead, afterRead)) {
                     throw new FileConflictException(
                         normalized, "Database changed while it was being opened");
                 }
-                db.importPgn(pgn);
-                int persistedNextId = readNextId(pgn);
+                db.importParsed(parsed);
                 if (persistedNextId > db.nextId) {
                     db.nextId = persistedNextId;
                 }
@@ -276,12 +281,49 @@ public final class Database implements AutoCloseable {
     /** Distinct categorical tags and the number of games carrying each one. */
     public synchronized Map<String, Integer> gameTagCounts() {
         Map<String, Integer> counts = new java.util.TreeMap<>();
-        for (Game game : games.values()) {
-            for (String tag : game.gameTags()) {
-                counts.merge(tag, 1, Integer::sum);
+        gameTagIndex.forEach((tag, ids) -> counts.put(tag, ids.size()));
+        return Collections.unmodifiableMap(new LinkedHashMap<>(counts));
+    }
+
+    /**
+     * Candidate game ids carrying all required tags and, when supplied, at
+     * least one optional tag. Uses the in-memory inverted tag index.
+     */
+    public synchronized List<Integer> gameIdsMatchingTags(
+            Collection<String> required, Collection<String> any) {
+        Set<String> requiredTags = GameTags.normalizeAll(required);
+        Set<String> anyTags = GameTags.normalizeAll(any);
+        LinkedHashSet<Integer> candidates = null;
+
+        List<String> requiredBySelectivity = new ArrayList<>(requiredTags);
+        requiredBySelectivity.sort(java.util.Comparator.comparingInt(tag -> {
+            Set<Integer> ids = gameTagIndex.get(tag);
+            return ids == null ? 0 : ids.size();
+        }));
+        for (String tag : requiredBySelectivity) {
+            Set<Integer> ids = gameTagIndex.get(tag);
+            if (ids == null) return List.of();
+            if (candidates == null) {
+                candidates = new LinkedHashSet<>(ids);
+            } else {
+                candidates.retainAll(ids);
+                if (candidates.isEmpty()) return List.of();
             }
         }
-        return Collections.unmodifiableMap(new LinkedHashMap<>(counts));
+
+        if (!anyTags.isEmpty()) {
+            LinkedHashSet<Integer> union = new LinkedHashSet<>();
+            for (String tag : anyTags) {
+                Set<Integer> ids = gameTagIndex.get(tag);
+                if (ids != null) union.addAll(ids);
+            }
+            if (candidates == null) {
+                candidates = union;
+            } else {
+                candidates.retainAll(union);
+            }
+        }
+        return candidates == null ? List.copyOf(games.keySet()) : List.copyOf(candidates);
     }
 
     /**
@@ -320,10 +362,8 @@ public final class Database implements AutoCloseable {
     }
 
     private List<Integer> gameIdsWithTag(String tag) {
-        return games.values().stream()
-            .filter(game -> game.hasGameTag(tag))
-            .map(Game::id)
-            .toList();
+        Set<Integer> ids = gameTagIndex.get(tag);
+        return ids == null ? List.of() : List.copyOf(ids);
     }
 
     private TagUpdateReport replaceGameTag(
@@ -443,10 +483,12 @@ public final class Database implements AutoCloseable {
         data.putAll(snapshot.data());
         positionIndex.clear();
         duplicateIndex.clear();
+        gameTagIndex.clear();
         for (int gameId : games.keySet()) {
             GameData gameData = data.get(gameId);
             indexPositions(gameId, gameData);
             indexDuplicate(gameId, gameData);
+            indexGameTags(gameId, games.get(gameId));
         }
         nextId = snapshot.nextId();
         dirty = snapshot.dirty();
@@ -489,6 +531,7 @@ public final class Database implements AutoCloseable {
         data.put(id, gameData);
         indexPositions(id, gameData);
         indexDuplicate(id, gameData);
+        indexGameTags(id, game);
         dirty = true;
         return id;
     }
@@ -501,6 +544,10 @@ public final class Database implements AutoCloseable {
     public synchronized ImportReport importPgn(String pgnText) {
         PgnReader.ParseResult parsed =
             new PgnReader(PgnReader.ValidationMode.STRICT).readString(pgnText);
+        return importParsed(parsed);
+    }
+
+    private ImportReport importParsed(PgnReader.ParseResult parsed) {
         List<String> warnings = new ArrayList<>(parsed.warnings());
         List<ImportError> errors = new ArrayList<>();
         for (PgnReader.RejectedGame rejected : parsed.rejectedGames()) {
@@ -554,7 +601,9 @@ public final class Database implements AutoCloseable {
     }
 
     public synchronized ImportReport importFile(Path pgnFile) throws IOException {
-        return importPgn(PgnReader.readFileText(pgnFile));
+        PgnReader.ParseResult parsed =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readFile(pgnFile);
+        return importParsed(parsed);
     }
 
     /**
@@ -622,6 +671,22 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    private void indexGameTags(int gameId, Game game) {
+        for (String tag : game.gameTags()) {
+            gameTagIndex.computeIfAbsent(tag, ignored -> new LinkedHashSet<>())
+                .add(gameId);
+        }
+    }
+
+    private void unindexGameTags(int gameId, Game game) {
+        for (String tag : game.gameTags()) {
+            Set<Integer> ids = gameTagIndex.get(tag);
+            if (ids == null) continue;
+            ids.remove(gameId);
+            if (ids.isEmpty()) gameTagIndex.remove(tag);
+        }
+    }
+
     /** Fill in missing ECO/Opening tags from the book classification. */
     private static void autoFillOpeningTags(Game game, GameData gameData) {
         if (gameData.eco() != null && game.tag("ECO") == null) {
@@ -639,6 +704,7 @@ public final class Database implements AutoCloseable {
         GameData removedData = data.remove(id);
         unindexPositions(id, removedData);
         unindexDuplicate(id, removedData);
+        unindexGameTags(id, removed);
         dirty = true;
         return true;
     }
@@ -666,10 +732,12 @@ public final class Database implements AutoCloseable {
         GameData currentData = data.get(id);
         unindexPositions(id, currentData);
         unindexDuplicate(id, currentData);
+        unindexGameTags(id, current);
         games.put(id, stored);
         data.put(id, replacementData);
         indexPositions(id, replacementData);
         indexDuplicate(id, replacementData);
+        indexGameTags(id, stored);
         dirty = true;
         return true;
     }
@@ -698,7 +766,13 @@ public final class Database implements AutoCloseable {
         updated.setId(id);
         updated.setTag(ID_TAG, Integer.toString(id));
         updated.makeReadOnly();
+        if (GameTags.PGN_TAG.equals(key)) {
+            unindexGameTags(id, game);
+        }
         games.put(id, updated);
+        if (GameTags.PGN_TAG.equals(key)) {
+            indexGameTags(id, updated);
+        }
         dirty = true;
         return true;
     }
@@ -891,8 +965,6 @@ public final class Database implements AutoCloseable {
     }
 
     private void writeAtomically(Path target) throws IOException {
-        String pgn = "% OrionDB NextId " + nextId + "\n"
-            + new PgnWriter().write(new ArrayList<>(games.values()));
         Path dir = target.toAbsolutePath().getParent();
         if (dir != null) {
             Files.createDirectories(dir);
@@ -902,7 +974,12 @@ public final class Database implements AutoCloseable {
         }
         Path temp = Files.createTempFile(dir, ".orion-", ".pgn.tmp");
         try {
-            Files.writeString(temp, pgn, StandardCharsets.UTF_8);
+            try (var writer = Files.newBufferedWriter(
+                    temp, StandardCharsets.UTF_8,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                writer.write("% OrionDB NextId " + nextId + "\n");
+                new PgnWriter().write(games.values(), writer);
+            }
             try (FileChannel channel = FileChannel.open(temp, StandardOpenOption.WRITE)) {
                 channel.force(true);
             }
@@ -936,14 +1013,30 @@ public final class Database implements AutoCloseable {
         }
     }
 
-    private static int readNextId(String pgn) {
-        Matcher matcher = NEXT_ID_HEADER.matcher(pgn);
-        if (!matcher.find()) return 1;
-        try {
-            return Integer.parseInt(matcher.group(1));
-        } catch (NumberFormatException e) {
-            return 1;
+    private static int readNextId(Path path) throws IOException {
+        try (BufferedReader reader =
+                 Files.newBufferedReader(path, StandardCharsets.ISO_8859_1)) {
+            boolean firstLine = true;
+            for (String line; (line = reader.readLine()) != null; ) {
+                if (firstLine && !line.isEmpty() && line.charAt(0) == '\uFEFF') {
+                    line = line.substring(1);
+                }
+                if (firstLine && line.startsWith("\u00EF\u00BB\u00BF")) {
+                    line = line.substring(3);
+                }
+                firstLine = false;
+                Matcher matcher = NEXT_ID_HEADER.matcher(line);
+                if (matcher.matches()) {
+                    try {
+                        return Integer.parseInt(matcher.group(1));
+                    } catch (NumberFormatException e) {
+                        return 1;
+                    }
+                }
+                if (!line.isBlank() && !line.startsWith("%")) break;
+            }
         }
+        return 1;
     }
 
     @Override

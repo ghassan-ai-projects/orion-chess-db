@@ -447,6 +447,14 @@ public final class Search {
                     matches.add(game);
                 }
             }
+        } else if (!requiredTags.isEmpty() || !anyTags.isEmpty()) {
+            // Fast path: candidates from the categorical-tag inverted index.
+            for (int gameId : db.gameIdsMatchingTags(requiredTags, anyTags)) {
+                Game game = db.game(gameId);
+                if (game != null && matches(game)) {
+                    matches.add(game);
+                }
+            }
         } else {
             for (Game game : db.games()) {
                 if (matches(game)) {

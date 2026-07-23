@@ -584,12 +584,13 @@ public final class Main {
             if (games.isEmpty()) {
                 games.addAll(db.games());
             }
-            String pgn = new PgnWriter().write(games);
             if (out != null) {
-                Files.writeString(out, pgn, StandardCharsets.UTF_8);
+                try (var writer = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
+                    new PgnWriter().write(games, writer);
+                }
                 System.out.println("Wrote " + games.size() + " games to " + out);
             } else {
-                System.out.print(pgn);
+                System.out.print(new PgnWriter().write(games));
             }
         }
     }

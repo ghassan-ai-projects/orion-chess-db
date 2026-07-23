@@ -851,14 +851,14 @@ final class DbTools {
         if ((text == null) == (filePath == null)) {
             throw new ToolError("Provide exactly one of pgn_text or file_path");
         }
-        if (filePath != null) {
-            try {
-                text = com.oriondb.pgn.PgnReader.readFileText(Path.of(filePath));
-            } catch (IOException e) {
-                throw new ToolError("Cannot read " + filePath + ": " + e.getMessage());
-            }
+        Database.ImportReport report;
+        try {
+            report = filePath != null
+                ? db.importFile(Path.of(filePath))
+                : db.importPgn(text);
+        } catch (IOException e) {
+            throw new ToolError("Cannot read " + filePath + ": " + e.getMessage());
         }
-        Database.ImportReport report = db.importPgn(text);
         JsonObject result = new JsonObject();
         result.addProperty("games_added", report.gamesAdded());
         result.addProperty("duplicates_skipped", report.duplicatesSkipped());
@@ -1176,19 +1176,20 @@ final class DbTools {
         } else {
             games.addAll(db.games());
         }
-        String pgn = new PgnWriter().write(games);
         JsonObject result = new JsonObject();
         result.addProperty("games_exported", games.size());
 
         String filePath = optString(args, "file_path");
         if (filePath != null) {
-            try {
-                Files.writeString(Path.of(filePath), pgn, StandardCharsets.UTF_8);
+            try (var writer =
+                     Files.newBufferedWriter(Path.of(filePath), StandardCharsets.UTF_8)) {
+                new PgnWriter().write(games, writer);
             } catch (IOException e) {
                 throw new ToolError("Cannot write " + filePath + ": " + e.getMessage());
             }
             result.addProperty("file_path", filePath);
         } else {
+            String pgn = new PgnWriter().write(games);
             if (pgn.length() > 400_000) {
                 throw new ToolError("Export is " + pgn.length()
                     + " characters; pass file_path to write it to a file instead");
