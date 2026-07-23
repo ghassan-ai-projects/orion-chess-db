@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Spec-compliant, error-tolerant PGN reader.
@@ -39,8 +40,8 @@ public final class PgnReader {
         private final List<String> warnings;
 
         ParseResult(List<Game> games, List<String> warnings) {
-            this.games = games;
-            this.warnings = warnings;
+            this.games = List.copyOf(games);
+            this.warnings = List.copyOf(warnings);
         }
 
         public List<Game> games() {
@@ -100,7 +101,7 @@ public final class PgnReader {
     }
 
     public ParseResult readString(String pgn) {
-        return new Parser(pgn, validate).parseAll();
+        return new Parser(Objects.requireNonNull(pgn, "pgn"), validate).parseAll();
     }
 
     // ==================================================================

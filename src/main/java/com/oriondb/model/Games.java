@@ -25,11 +25,7 @@ public final class Games {
     public static Board startingBoard(Game game) {
         String fen = game.tag("FEN");
         if (fen != null && !fen.isBlank()) {
-            try {
-                return Board.fromFen(fen);
-            } catch (IllegalArgumentException ignored) {
-                // fall through to the standard start
-            }
+            return Board.fromFen(fen);
         }
         return Board.startingPosition();
     }

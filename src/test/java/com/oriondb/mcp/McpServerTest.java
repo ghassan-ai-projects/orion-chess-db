@@ -85,8 +85,9 @@ class McpServerTest {
     void toolsList() {
         JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
         JsonArray tools = response.getAsJsonObject("result").getAsJsonArray("tools");
-        assertEquals(13, tools.size());
+        assertEquals(14, tools.size());
         boolean foundSearch = false;
+        boolean foundGameTags = false;
         for (var tool : tools) {
             JsonObject t = tool.getAsJsonObject();
             assertTrue(t.has("name"));
@@ -94,8 +95,10 @@ class McpServerTest {
             assertEquals("object",
                 t.getAsJsonObject("inputSchema").get("type").getAsString());
             if (t.get("name").getAsString().equals("search_games")) foundSearch = true;
+            if (t.get("name").getAsString().equals("update_game_tags")) foundGameTags = true;
         }
         assertTrue(foundSearch);
+        assertTrue(foundGameTags);
     }
 
     @Test
@@ -175,6 +178,34 @@ class McpServerTest {
         JsonObject deleted = payload(callTool("delete_game", "{\"game_id\":" + newId + "}"));
         assertEquals(6, deleted.get("game_count").getAsInt());
         assertNull(db.game(newId));
+    }
+
+    @Test
+    void bulkGameTagsAndTagSearch() {
+        int morphy = db.search().player("Morphy").find().get(0).id();
+        int kasparov = db.search().player("Kasparov").find().get(0).id();
+
+        JsonObject updated = payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + morphy + "," + kasparov
+                + "],\"add\":[\"Tactics\",\"Reviewed\"]}"));
+        assertEquals(2, updated.get("games_updated").getAsInt());
+        assertEquals(2, updated.getAsJsonArray("games").size());
+
+        payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + morphy + "],\"add\":[\"Study\"]}"));
+
+        JsonObject all = payload(callTool("search_games",
+            "{\"tags\":[\"tactics\",\"study\"],\"tag_mode\":\"all\"}"));
+        assertEquals(1, all.get("total_count").getAsInt());
+        JsonObject game = all.getAsJsonArray("games").get(0).getAsJsonObject();
+        assertEquals(morphy, game.get("game_id").getAsInt());
+        assertTrue(game.getAsJsonArray("game_tags").toString().contains("study"));
+
+        JsonObject excluded = payload(callTool("search_games",
+            "{\"tags\":[\"tactics\"],\"exclude_tags\":[\"study\"]}"));
+        assertEquals(1, excluded.get("total_count").getAsInt());
+        assertEquals(kasparov, excluded.getAsJsonArray("games")
+            .get(0).getAsJsonObject().get("game_id").getAsInt());
     }
 
     @Test

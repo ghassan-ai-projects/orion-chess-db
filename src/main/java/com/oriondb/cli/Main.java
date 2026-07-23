@@ -31,6 +31,7 @@ import java.util.Map;
  * oriondb game      games.pgn 17
  * oriondb player    games.pgn "Carlsen"
  * oriondb h2h       games.pgn "Kasparov" "Karpov"
+ * oriondb tag       games.pgn --ids 1,2 --add tactics,study
  * oriondb export    games.pgn --ids 1,2,3 -o out.pgn
  * oriondb dedupe    games.pgn
  * </pre>
@@ -79,6 +80,7 @@ public final class Main {
             case "game": game(dbPath, rest); break;
             case "player": player(dbPath, rest); break;
             case "h2h": h2h(dbPath, rest); break;
+            case "tag": tag(dbPath, rest); break;
             case "export": export(dbPath, rest); break;
             case "dedupe": dedupe(dbPath); break;
             default:
@@ -100,12 +102,15 @@ public final class Main {
                         --date-from --date-to --min-elo --max-elo --elo-mode
                         --opening-line "1. e4 c5" --fen FEN --material "KRP vs KR"
                         --max-pieces N --motif fork --pawn iqp --comment TEXT
+                        --tag TAG --any-tag TAG --without-tag TAG
                         --annotated --sort date|avg_elo|ply_count --desc
                         --limit N --offset N
               explorer  Opening tree: explorer db.pgn "1. e4 c5 2. Nf3"
               game      Show one game with tactics: game db.pgn <id>
               player    Player dossier: player db.pgn "Carlsen"
               h2h       Head to head: h2h db.pgn "Kasparov" "Karpov"
+              tag       Update game tags: tag db.pgn --ids 1,2 --add tactics,study
+                        Use --remove TAGS or --set TAGS to replace all
               export    Write PGN: export db.pgn [--ids 1,2,3] [-o out.pgn]
               dedupe    List duplicate games
 
@@ -149,6 +154,15 @@ public final class Main {
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
                 .limit(10)
                 .forEach(e -> System.out.printf("  %-4s %d games%n", e.getKey(), e.getValue()));
+            Map<String, Integer> tagCounts = db.gameTagCounts();
+            if (!tagCounts.isEmpty()) {
+                System.out.println("Top tags:");
+                tagCounts.entrySet().stream()
+                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                    .limit(10)
+                    .forEach(e -> System.out.printf(
+                        "  %-24s %d games%n", e.getKey(), e.getValue()));
+            }
         }
     }
 
@@ -214,6 +228,9 @@ public final class Main {
                             case "--motif": search.motif(value); break;
                             case "--pawn": search.pawnFeature(value); break;
                             case "--comment": search.commentContains(value); break;
+                            case "--tag": search.tag(value); break;
+                            case "--any-tag": search.anyTag(value); break;
+                            case "--without-tag": search.withoutTag(value); break;
                             case "--sort": sort = value; break;
                             case "--limit": limit = Integer.parseInt(value); break;
                             case "--offset": offset = Integer.parseInt(value); break;
@@ -232,12 +249,15 @@ public final class Main {
             int total = search.count();
             List<Game> games = search.limit(limit).offset(offset).find();
             for (Game game : games) {
-                System.out.printf("#%-5d %-24s - %-24s %-7s %-10s %s %s%n",
+                String tags = game.gameTags().isEmpty()
+                    ? "" : " [" + String.join(", ", game.gameTags()) + "]";
+                System.out.printf("#%-5d %-24s - %-24s %-7s %-10s %s %s%s%n",
                     game.id(),
                     clip(game.white(), 24), clip(game.black(), 24),
                     game.result(), game.date(),
                     game.tag("ECO", ""),
-                    clip(game.tag("Opening", ""), 30));
+                    clip(game.tag("Opening", ""), 30),
+                    tags);
             }
             System.out.println(games.size() + " of " + total + " matching games shown.");
         }
@@ -358,6 +378,72 @@ public final class Main {
             printScore("As Black", h2h.aAsBlack());
             System.out.println("Games: " + h2h.gameIds());
         }
+    }
+
+    private static void tag(Path dbPath, String[] args) throws Exception {
+        List<Integer> ids = new ArrayList<>();
+        List<String> add = new ArrayList<>();
+        List<String> remove = new ArrayList<>();
+        List<String> replacement = null;
+
+        for (int i = 0; i < args.length; i++) {
+            String flag = args[i];
+            if (i + 1 >= args.length) {
+                throw new UsageException("Missing value for " + flag);
+            }
+            String value = args[++i];
+            switch (flag) {
+                case "--ids":
+                    for (String id : value.split(",")) {
+                        ids.add(Integer.parseInt(id.trim()));
+                    }
+                    break;
+                case "--add":
+                    add.addAll(tagList(value));
+                    break;
+                case "--remove":
+                    remove.addAll(tagList(value));
+                    break;
+                case "--set":
+                    replacement = tagList(value);
+                    break;
+                default:
+                    throw new UsageException("Unknown tag option: " + flag);
+            }
+        }
+        if (ids.isEmpty()) {
+            throw new UsageException("tag needs --ids with one or more game ids");
+        }
+        if (replacement != null && (!add.isEmpty() || !remove.isEmpty())) {
+            throw new UsageException("--set cannot be combined with --add or --remove");
+        }
+        if (replacement == null && add.isEmpty() && remove.isEmpty()) {
+            throw new UsageException("tag needs --add, --remove, or --set");
+        }
+
+        try (Database db = Database.open(dbPath)) {
+            db.setSaveOnClose(false);
+            Database.TagUpdateReport report = replacement != null
+                ? db.setGameTags(ids, replacement)
+                : db.updateGameTags(ids, add, remove);
+            if (report.gamesUpdated() > 0) {
+                db.save();
+            }
+            System.out.printf("%d games updated, %d unchanged.%n",
+                report.gamesUpdated(), report.gamesUnchanged());
+            if (!report.missingGameIds().isEmpty()) {
+                System.out.println("Missing game ids: " + report.missingGameIds());
+            }
+        }
+    }
+
+    private static List<String> tagList(String value) {
+        List<String> tags = new ArrayList<>();
+        if (value == null || value.isBlank()) return tags;
+        for (String tag : value.split(",")) {
+            if (!tag.isBlank()) tags.add(tag);
+        }
+        return tags;
     }
 
     private static void export(Path dbPath, String[] args) throws Exception {

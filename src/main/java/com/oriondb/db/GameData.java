@@ -91,11 +91,11 @@ public final class GameData {
     }
 
     public long[] hashes() {
-        return hashes;
+        return hashes.clone();
     }
 
     public int[] materialKeys() {
-        return materialKeys;
+        return materialKeys.clone();
     }
 
     public int motifMask() {

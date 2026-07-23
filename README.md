@@ -15,7 +15,7 @@ nothing to migrate.
 │                      oriondb.jar                        │
 │                                                         │
 │  CLI (humans)                    MCP server (agents)    │
-│  search / explorer / player      13 tools over stdio    │
+│  search / explorer / player      14 tools over stdio    │
 │        └──────────────┬──────────────┘                  │
 │                  Search engine                          │
 │   metadata · positions · material · tactics · text      │
@@ -56,7 +56,13 @@ nothing to migrate.
   repertoire with scores, best wins) and head-to-head reports.
 - **Duplicate detection**, comment full-text search, pawn-structure filters
   (IQP, passed pawns, ...), date/Elo/event/result filters, sorting, pagination.
-- **Zero-infrastructure.** One 500 KB jar, one PGN file. Atomic saves.
+- **First-class game tags.** Categorize one game or update many at once, then
+  search for all/any tags or exclude tags. Values are case-insensitive and
+  persist in the portable `OrionTags` PGN header.
+- **Stable game identity.** Database-assigned ids survive deletes and restarts
+  through the portable `OrionDBId` PGN tag.
+- **Zero-infrastructure.** One 500 KB jar, one PGN file. Durable atomic saves
+  reject conflicting edits made by another process.
   12,500 real master games import in ~7 s and reopen in ~6 s on a laptop;
   a 3,000-game personal collection feels instant.
 
@@ -82,6 +88,12 @@ Everything runs through the launcher (or `java -jar target/oriondb.jar ...`):
 ./bin/oriondb search mygames.pgn --material "KRP vs KR" --max-pieces 6
 ./bin/oriondb search mygames.pgn --motif underpromotion
 ./bin/oriondb search mygames.pgn --opening-line "1. e4 c5 2. Nf3 d6" --min-elo 2700
+./bin/oriondb search mygames.pgn --tag opening-prep --without-tag reviewed
+
+# Categorize one or many games
+./bin/oriondb tag mygames.pgn --ids 17 --add "tactics,study"
+./bin/oriondb tag mygames.pgn --ids 1,5,9 --add reviewed --remove inbox
+./bin/oriondb tag mygames.pgn --ids 17 --set "favorite,opening prep"
 
 # Opening explorer from any position
 ./bin/oriondb explorer mygames.pgn "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6"
@@ -133,7 +145,7 @@ claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygam
 
 | Tool | What it does |
 |---|---|
-| `db_stats` | Game count, players, date range, top openings |
+| `db_stats` | Game count, players, date range, top openings and tags |
 | `search_games` | Every filter below, AND-combined, with sort + pagination |
 | `get_game` | Full game: tags, moves, PGN, final FEN, tactical moments |
 | `opening_explorer` | Move statistics tree for any position |
@@ -144,6 +156,7 @@ claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygam
 | `add_game` | Add a single game, returns its id |
 | `delete_game` | Remove a game |
 | `set_tag` | Edit or remove a PGN tag |
+| `update_game_tags` | Add, remove, or replace categories on one or many games |
 | `export_pgn` | Export by ids or everything, to text or file |
 | `find_duplicates` | Groups of games with identical moves |
 
@@ -153,8 +166,8 @@ Mutations save to disk automatically (atomic temp-file + rename).
 (exact / prefix / range), `opening`, `result`, `date_from`, `date_to`,
 `min_elo`, `max_elo`, `elo_mode` (either/both/average), `min_ply`, `max_ply`,
 `opening_line`, `contains_fen`, `material`, `max_pieces`, `motif`,
-`pawn_feature`, `comment_contains`, `annotated`, `sort_by`, `descending`,
-`limit`, `offset`.
+`pawn_feature`, `comment_contains`, `tags`, `tag_mode` (all/any),
+`exclude_tags`, `annotated`, `sort_by`, `descending`, `limit`, `offset`.
 
 ## Library use
 
@@ -173,6 +186,22 @@ try (Database db = Database.open(Path.of("mygames.pgn"))) {
     PlayerStats.Report report = db.players().report("Kasparov");
     // Tactics of one game
     List<Motifs.Moment> moments = Motifs.moments(games.get(0));
+
+    // Categorize games individually or in a batch.
+    db.addGameTags(games.get(0).id(), "tactics", "study");
+    db.updateGameTags(
+        games.stream().map(Game::id).toList(),
+        List.of("reviewed"), List.of("inbox"));
+    List<Game> tagged = db.search()
+        .tags("tactics", "study")       // all supplied tags
+        .withoutTag("archived")
+        .find();
+
+    // Stored games are read-only so indexes cannot silently become stale.
+    // Copy and atomically replace a game when editing moves or annotations.
+    Game edited = games.get(0).copy();
+    edited.setTag("Annotator", "My Tool");
+    db.replace(edited.id(), edited);
 }
 ```
 
@@ -185,7 +214,14 @@ sample database.
 - **PGN is the storage format.** At this scale (thousands of games, not
   millions) everything fits comfortably in memory: opening a database
   re-validates and re-indexes it (parallelized across cores), which takes a
-  couple of seconds and guarantees indexes are never stale. Saves are atomic.
+  couple of seconds and guarantees indexes are never stale. Stable ids use
+  the `OrionDBId` tag plus one standard PGN `%` escape line for the next id.
+  Saves are atomic, flushed before rename, and refuse to overwrite a backing
+  file changed since it was opened.
+- **Mutation is explicit.** Games returned by `game`, `games`, and searches are
+  read-only. Use `copy()` plus `replace(id, game)` for an atomic validated edit,
+  or `setTag` for metadata. Read methods return snapshots or defensive copies,
+  making concurrent readers safe while writes are serialized.
 - **The chess core is the foundation.** SAN disambiguation legally requires
   pin-aware move generation (`Re2` when one rook is pinned), so the engine
   implements full legality and is perft-validated. Zobrist hashes use the
@@ -201,13 +237,13 @@ sample database.
 ```
 src/main/java/com/oriondb/
   chess/      Board, legal movegen, SAN, FEN, Zobrist
-  model/      Game, MoveNode (move tree), replay helpers
+  model/      Game, GameTags, MoveNode (move tree), replay helpers
   pgn/        PgnReader (tolerant tokenizer), PgnWriter
   eco/        EcoClassifier + embedded openings book (CC0)
   analysis/   Material signatures, pawn features, tactical motifs
   db/         Database (PGN persistence, indexes), GameData
   search/     Search, OpeningExplorer, PlayerStats, Duplicates
-  mcp/        McpServer (stdio JSON-RPC), DbTools (13 tools)
+  mcp/        McpServer (stdio JSON-RPC), DbTools (14 tools)
   cli/        Main
 ```
 

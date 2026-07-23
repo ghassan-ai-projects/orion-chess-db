@@ -80,7 +80,9 @@ final class DbTools {
         JsonObject args = params.has("arguments") && params.get("arguments").isJsonObject()
             ? params.getAsJsonObject("arguments") : new JsonObject();
         try {
-            return successResult(tool.handler().apply(args));
+            synchronized (db) {
+                return successResult(tool.handler().apply(args));
+            }
         } catch (ToolError e) {
             return errorResult(e.getMessage());
         } catch (IllegalArgumentException e) {
@@ -159,6 +161,9 @@ final class DbTools {
                 str("pawn_feature", "Pawn structure feature: iqp, doubled, isolated, passed, "
                     + "advanced-passer (prefix with 'white-'/'black-' for one side)"),
                 str("comment_contains", "Game commentary contains this text"),
+                stringArray("tags", "Categorical game tags to match"),
+                str("tag_mode", "How tags match: 'all' (default) or 'any'"),
+                stringArray("exclude_tags", "Exclude games carrying any of these tags"),
                 bool("annotated", "true: only games with comments/variations/NAGs; "
                     + "false: only bare games"),
                 str("sort_by", "'date', 'white_elo', 'black_elo', 'avg_elo', 'ply_count', "
@@ -248,6 +253,18 @@ final class DbTools {
                 "game_id", "key"),
             this::setTag);
 
+        add("update_game_tags",
+            "Add, remove, or replace categorical tags on one or more games. Tags are "
+            + "case-insensitive, normalized, and stored in the portable OrionTags PGN "
+            + "header. Use set to replace all tags, or add/remove for incremental updates.",
+            schema(props(
+                intArray("game_ids", "One or more game ids to update"),
+                stringArray("add", "Tags to add"),
+                stringArray("remove", "Tags to remove"),
+                stringArray("set", "Exact replacement tags; an empty array clears all")),
+                "game_ids"),
+            this::updateGameTags);
+
         add("export_pgn",
             "Export games as PGN text, or write them to a file when file_path is given. "
             + "Omit game_ids to export the whole database.",
@@ -328,6 +345,14 @@ final class DbTools {
         return p;
     }
 
+    private static JsonObject stringArray(String name, String description) {
+        JsonObject p = typed(name, "array", description);
+        JsonObject items = new JsonObject();
+        items.addProperty("type", "string");
+        p.add("items", items);
+        return p;
+    }
+
     // ==================================================================
     // Argument helpers
     // ==================================================================
@@ -361,6 +386,34 @@ final class DbTools {
         Integer i = optInt(args, key);
         if (i == null) throw new ToolError("Missing required argument: " + key);
         return i;
+    }
+
+    private static List<String> optStrings(JsonObject args, String key) {
+        JsonElement element = args.get(key);
+        if (element == null || element.isJsonNull()) return List.of();
+        if (!element.isJsonArray()) {
+            throw new ToolError(key + " must be an array");
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonElement item : element.getAsJsonArray()) {
+            values.add(item.getAsString());
+        }
+        return values;
+    }
+
+    private static List<Integer> reqInts(JsonObject args, String key) {
+        JsonElement element = args.get(key);
+        if (element == null || !element.isJsonArray()) {
+            throw new ToolError("Missing required array: " + key);
+        }
+        List<Integer> values = new ArrayList<>();
+        for (JsonElement item : element.getAsJsonArray()) {
+            values.add(item.getAsInt());
+        }
+        if (values.isEmpty()) {
+            throw new ToolError(key + " must contain at least one id");
+        }
+        return values;
     }
 
     // ==================================================================
@@ -408,6 +461,7 @@ final class DbTools {
         result.addProperty("annotated_games", annotated);
         result.add("top_ecos", topCounts(ecoCounts, 10));
         result.add("top_openings", topCounts(openingCounts, 10));
+        result.add("top_tags", topCounts(db.gameTagCounts(), 20));
         return result;
     }
 
@@ -453,6 +507,19 @@ final class DbTools {
         if ((s = optString(args, "motif")) != null) search.motif(s);
         if ((s = optString(args, "pawn_feature")) != null) search.pawnFeature(s);
         if ((s = optString(args, "comment_contains")) != null) search.commentContains(s);
+        List<String> tags = optStrings(args, "tags");
+        if (!tags.isEmpty()) {
+            String mode = optString(args, "tag_mode");
+            if (mode == null || mode.equalsIgnoreCase("all")) {
+                search.tags(tags);
+            } else if (mode.equalsIgnoreCase("any")) {
+                search.anyTags(tags);
+            } else {
+                throw new IllegalArgumentException("tag_mode must be 'all' or 'any'");
+            }
+        }
+        List<String> excludedTags = optStrings(args, "exclude_tags");
+        if (!excludedTags.isEmpty()) search.withoutTags(excludedTags);
         Boolean b;
         if ((b = optBool(args, "annotated")) != null) search.annotated(b);
         if ((s = optString(args, "sort_by")) != null) {
@@ -757,6 +824,46 @@ final class DbTools {
         return result;
     }
 
+    private JsonObject updateGameTags(JsonObject args) {
+        List<Integer> ids = reqInts(args, "game_ids");
+        boolean hasSet = args.has("set") && !args.get("set").isJsonNull();
+        List<String> replacement = optStrings(args, "set");
+        List<String> add = optStrings(args, "add");
+        List<String> remove = optStrings(args, "remove");
+        if (hasSet && (!add.isEmpty() || !remove.isEmpty())) {
+            throw new ToolError("set cannot be combined with add or remove");
+        }
+        if (!hasSet && add.isEmpty() && remove.isEmpty()) {
+            throw new ToolError("Provide set, add, or remove");
+        }
+
+        Database.TagUpdateReport report = hasSet
+            ? db.setGameTags(ids, replacement)
+            : db.updateGameTags(ids, add, remove);
+        if (report.gamesUpdated() > 0) autoSave();
+
+        JsonObject result = new JsonObject();
+        result.addProperty("games_updated", report.gamesUpdated());
+        result.addProperty("games_unchanged", report.gamesUnchanged());
+        JsonArray missing = new JsonArray();
+        for (int id : report.missingGameIds()) missing.add(id);
+        result.add("missing_game_ids", missing);
+
+        JsonArray games = new JsonArray();
+        for (int id : ids) {
+            Game game = db.game(id);
+            if (game == null) continue;
+            JsonObject item = new JsonObject();
+            item.addProperty("game_id", id);
+            JsonArray gameTags = new JsonArray();
+            for (String tag : game.gameTags()) gameTags.add(tag);
+            item.add("game_tags", gameTags);
+            games.add(item);
+        }
+        result.add("games", games);
+        return result;
+    }
+
     private JsonObject exportPgn(JsonObject args) {
         List<Game> games = new ArrayList<>();
         JsonElement idsElement = args.get("game_ids");
@@ -831,6 +938,9 @@ final class DbTools {
         String opening = game.tag("Opening");
         if (opening == null && data != null) opening = data.openingName();
         if (opening != null) summary.addProperty("opening", opening);
+        JsonArray tags = new JsonArray();
+        for (String tag : game.gameTags()) tags.add(tag);
+        summary.add("game_tags", tags);
         summary.addProperty("ply_count", game.plyCount());
         if (game.hasAnnotations()) summary.addProperty("annotated", true);
         return summary;

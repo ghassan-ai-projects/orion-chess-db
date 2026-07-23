@@ -71,6 +71,12 @@ public final class OpeningExplorer {
     }
 
     public Result explore(Board position) {
+        synchronized (db) {
+            return exploreLocked(position);
+        }
+    }
+
+    private Result exploreLocked(Board position) {
         long hash = position.zobrist();
         boolean whiteToMove = position.whiteToMove();
 
