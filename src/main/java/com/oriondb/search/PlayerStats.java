@@ -76,6 +76,12 @@ public final class PlayerStats {
 
     /** Dossier for a player; null when no games match. */
     public Report report(String playerQuery) {
+        synchronized (db) {
+            return reportLocked(playerQuery);
+        }
+    }
+
+    private Report reportLocked(String playerQuery) {
         String needle = playerQuery.toLowerCase(Locale.ROOT).trim();
         if (needle.isEmpty()) return null;
 
@@ -182,6 +188,12 @@ public final class PlayerStats {
 
     /** Head-to-head between two players; null when they never met. */
     public HeadToHead headToHead(String playerA, String playerB) {
+        synchronized (db) {
+            return headToHeadLocked(playerA, playerB);
+        }
+    }
+
+    private HeadToHead headToHeadLocked(String playerA, String playerB) {
         String a = playerA.toLowerCase(Locale.ROOT).trim();
         String b = playerB.toLowerCase(Locale.ROOT).trim();
         if (a.isEmpty() || b.isEmpty()) return null;

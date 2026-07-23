@@ -8,12 +8,18 @@ import com.oriondb.chess.Move;
 import com.oriondb.db.Database;
 import com.oriondb.db.GameData;
 import com.oriondb.model.Game;
+import com.oriondb.model.GameTags;
 import com.oriondb.model.MoveNode;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Fluent game search. All criteria combine with AND. Text criteria are
@@ -57,6 +63,9 @@ public final class Search {
     private int pawnMask;
     private String commentText;
     private Boolean annotated;
+    private final Set<String> requiredTags = new LinkedHashSet<>();
+    private final Set<String> anyTags = new LinkedHashSet<>();
+    private final Set<String> excludedTags = new LinkedHashSet<>();
     private Sort sort = Sort.ID;
     private boolean descending;
     private int limit = Integer.MAX_VALUE;
@@ -305,6 +314,57 @@ public final class Search {
         return this;
     }
 
+    /** Require one categorical game tag. Repeated calls combine with AND. */
+    public Search tag(String tag) {
+        requiredTags.add(GameTags.normalize(tag));
+        return this;
+    }
+
+    /** Require every categorical game tag. */
+    public Search tags(String... tags) {
+        return tags(Arrays.asList(tags));
+    }
+
+    /** Require every categorical game tag. */
+    public Search tags(Collection<String> tags) {
+        requiredTags.addAll(GameTags.normalizeAll(tags));
+        return this;
+    }
+
+    /** Require at least one of the supplied categorical game tags. */
+    public Search anyTag(String tag) {
+        anyTags.add(GameTags.normalize(tag));
+        return this;
+    }
+
+    /** Require at least one of the supplied categorical game tags. */
+    public Search anyTags(String... tags) {
+        return anyTags(Arrays.asList(tags));
+    }
+
+    /** Require at least one of the supplied categorical game tags. */
+    public Search anyTags(Collection<String> tags) {
+        anyTags.addAll(GameTags.normalizeAll(tags));
+        return this;
+    }
+
+    /** Exclude games carrying this categorical tag. */
+    public Search withoutTag(String tag) {
+        excludedTags.add(GameTags.normalize(tag));
+        return this;
+    }
+
+    /** Exclude games carrying any of the supplied categorical tags. */
+    public Search withoutTags(String... tags) {
+        return withoutTags(Arrays.asList(tags));
+    }
+
+    /** Exclude games carrying any of the supplied categorical tags. */
+    public Search withoutTags(Collection<String> tags) {
+        excludedTags.addAll(GameTags.normalizeAll(tags));
+        return this;
+    }
+
     public Search sortBy(Sort sort, boolean descending) {
         this.sort = sort;
         this.descending = descending;
@@ -321,6 +381,36 @@ public final class Search {
         return this;
     }
 
+    /**
+     * Add and remove categorical tags on every game returned by this search.
+     * Sorting, limit, and offset are honored.
+     */
+    public Database.TagUpdateReport updateGameTags(
+            Collection<String> add, Collection<String> remove) {
+        synchronized (db) {
+            List<Integer> ids = find().stream().map(Game::id).toList();
+            return db.updateGameTags(ids, add, remove);
+        }
+    }
+
+    /** Add categorical tags to every game returned by this search. */
+    public Database.TagUpdateReport addGameTags(String... tags) {
+        return updateGameTags(Arrays.asList(tags), List.of());
+    }
+
+    /** Remove categorical tags from every game returned by this search. */
+    public Database.TagUpdateReport removeGameTags(String... tags) {
+        return updateGameTags(List.of(), Arrays.asList(tags));
+    }
+
+    /** Replace categorical tags on every game returned by this search. */
+    public Database.TagUpdateReport setGameTags(Collection<String> tags) {
+        synchronized (db) {
+            List<Integer> ids = find().stream().map(Game::id).toList();
+            return db.setGameTags(ids, tags);
+        }
+    }
+
     private static String lower(String s) {
         return s == null ? null : s.toLowerCase(Locale.ROOT);
     }
@@ -331,16 +421,20 @@ public final class Search {
 
     /** Matching games, sorted and paginated. */
     public List<Game> find() {
-        List<Game> matches = collect();
-        matches.sort(comparator());
-        int from = Math.min(offset, matches.size());
-        int to = (int) Math.min((long) from + limit, matches.size());
-        return new ArrayList<>(matches.subList(from, to));
+        synchronized (db) {
+            List<Game> matches = collect();
+            matches.sort(comparator());
+            int from = Math.min(offset, matches.size());
+            int to = (int) Math.min((long) from + limit, matches.size());
+            return new ArrayList<>(matches.subList(from, to));
+        }
     }
 
     /** Total match count, ignoring limit/offset. */
     public int count() {
-        return collect().size();
+        synchronized (db) {
+            return collect().size();
+        }
     }
 
     private List<Game> collect() {
@@ -349,6 +443,14 @@ public final class Search {
             // Fast path: candidates from the position index.
             for (long entry : db.positionEntries(positionHash)) {
                 Game game = db.game(Database.entryGameId(entry));
+                if (game != null && matches(game)) {
+                    matches.add(game);
+                }
+            }
+        } else if (!requiredTags.isEmpty() || !anyTags.isEmpty()) {
+            // Fast path: candidates from the categorical-tag inverted index.
+            for (int gameId : db.gameIdsMatchingTags(requiredTags, anyTags)) {
+                Game game = db.game(gameId);
                 if (game != null && matches(game)) {
                     matches.add(game);
                 }
@@ -424,6 +526,15 @@ public final class Search {
         if (annotated != null && game.hasAnnotations() != annotated) return false;
 
         if (commentText != null && !commentsContain(game, commentText)) return false;
+
+        if (!requiredTags.isEmpty() || !anyTags.isEmpty() || !excludedTags.isEmpty()) {
+            Set<String> gameTags = game.gameTags();
+            if (!gameTags.containsAll(requiredTags)) return false;
+            if (!anyTags.isEmpty() && Collections.disjoint(gameTags, anyTags)) return false;
+            if (!excludedTags.isEmpty() && !Collections.disjoint(gameTags, excludedTags)) {
+                return false;
+            }
+        }
 
         return true;
     }

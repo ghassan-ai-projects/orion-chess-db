@@ -57,6 +57,8 @@ public class ApiExample {
 
             // --- Tactical moments of one game ----------------------------
             Game opera = db.search().player("Morphy").find().get(0);
+            db.addGameTags(opera.id(), "classic", "tactics");
+            System.out.println("Tagged classics: " + db.search().tag("classic").count());
             System.out.println("\nTactics in " + opera + ":");
             for (Motifs.Moment moment : Motifs.moments(opera)) {
                 System.out.printf("  move %d: %s  [%s]%n",

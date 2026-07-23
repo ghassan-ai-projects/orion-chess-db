@@ -61,4 +61,6 @@ build/
 
 # Local database files (a database is a plain .pgn file)
 *.pgn
+*.pgn.bak
+*.pgn.lock
 !examples/famous-games.pgn

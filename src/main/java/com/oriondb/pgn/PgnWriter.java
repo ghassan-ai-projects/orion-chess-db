@@ -4,6 +4,9 @@ import com.oriondb.chess.Board;
 import com.oriondb.model.Game;
 import com.oriondb.model.MoveNode;
 
+import java.io.IOException;
+import java.io.StringWriter;
+import java.io.Writer;
 import java.util.List;
 import java.util.Map;
 
@@ -20,43 +23,61 @@ public final class PgnWriter {
 
     /** One game as PGN text, ending with a newline. */
     public String write(Game game) {
-        StringBuilder sb = new StringBuilder(1024);
-        writeTags(game, sb);
-        sb.append('\n');
-        writeMovetext(game, sb);
-        return sb.toString();
+        StringWriter writer = new StringWriter(1024);
+        try {
+            write(game, writer);
+        } catch (IOException impossible) {
+            throw new AssertionError("StringWriter failed", impossible);
+        }
+        return writer.toString();
     }
 
     /** All games separated by blank lines. */
     public String write(List<Game> games) {
-        StringBuilder sb = new StringBuilder(games.size() * 1024);
+        StringWriter writer = new StringWriter(games.size() * 1024);
+        try {
+            write(games, writer);
+        } catch (IOException impossible) {
+            throw new AssertionError("StringWriter failed", impossible);
+        }
+        return writer.toString();
+    }
+
+    /** Stream one game to a character writer. The writer is not closed. */
+    public void write(Game game, Writer writer) throws IOException {
+        writeTags(game, writer);
+        writer.append('\n');
+        writeMovetext(game, writer);
+    }
+
+    /** Stream games separated by blank lines. The writer is not closed. */
+    public void write(Iterable<Game> games, Writer writer) throws IOException {
         boolean first = true;
         for (Game game : games) {
-            if (!first) sb.append('\n');
+            if (!first) writer.append('\n');
             first = false;
-            writeTags(game, sb);
-            sb.append('\n');
-            writeMovetext(game, sb);
+            writeTags(game, writer);
+            writer.append('\n');
+            writeMovetext(game, writer);
         }
-        return sb.toString();
     }
 
     // ------------------------------------------------------------------
     // Tags
     // ------------------------------------------------------------------
 
-    private void writeTags(Game game, StringBuilder sb) {
+    private void writeTags(Game game, Writer writer) throws IOException {
         for (String key : SEVEN_TAG_ROSTER) {
             String value = game.tag(key);
             if (value == null) {
                 value = key.equals("Date") ? Game.UNKNOWN_DATE
                     : key.equals("Result") ? "*" : "?";
             }
-            writeTag(sb, key, value);
+            writeTag(writer, key, value);
         }
         for (Map.Entry<String, String> tag : game.tags().entrySet()) {
             if (!isRosterTag(tag.getKey())) {
-                writeTag(sb, tag.getKey(), tag.getValue());
+                writeTag(writer, tag.getKey(), tag.getValue());
             }
         }
     }
@@ -68,8 +89,8 @@ public final class PgnWriter {
         return false;
     }
 
-    private void writeTag(StringBuilder sb, String key, String value) {
-        sb.append('[').append(key).append(" \"")
+    private void writeTag(Writer writer, String key, String value) throws IOException {
+        writer.append('[').append(key).append(" \"")
           .append(value.replace("\\", "\\\\").replace("\"", "\\\""))
           .append("\"]\n");
     }
@@ -80,14 +101,14 @@ public final class PgnWriter {
 
     /** Token emitter with word wrap. */
     private static final class LineBuffer {
-        private final StringBuilder out;
+        private final Writer out;
         private int column;
 
-        LineBuffer(StringBuilder out) {
+        LineBuffer(Writer out) {
             this.out = out;
         }
 
-        void emit(String token) {
+        void emit(String token) throws IOException {
             if (token.isEmpty()) return;
             if (column == 0) {
                 out.append(token);
@@ -101,13 +122,13 @@ public final class PgnWriter {
             }
         }
 
-        void finish() {
+        void finish() throws IOException {
             if (column > 0) out.append('\n');
         }
     }
 
-    private void writeMovetext(Game game, StringBuilder sb) {
-        LineBuffer buffer = new LineBuffer(sb);
+    private void writeMovetext(Game game, Writer writer) throws IOException {
+        LineBuffer buffer = new LineBuffer(writer);
 
         if (game.gameComment() != null) {
             emitComment(buffer, game.gameComment());
@@ -138,7 +159,9 @@ public final class PgnWriter {
      * Emit one line of moves. {@code moveNumber}/{@code whiteToMove} describe
      * the first move of the line.
      */
-    private void emitLine(LineBuffer buffer, MoveNode first, int moveNumber, boolean whiteToMove) {
+    private void emitLine(
+            LineBuffer buffer, MoveNode first, int moveNumber, boolean whiteToMove)
+            throws IOException {
         boolean needNumber = true;
         MoveNode node = first;
         int number = moveNumber;
@@ -188,7 +211,7 @@ public final class PgnWriter {
         }
     }
 
-    private void emitComment(LineBuffer buffer, String comment) {
+    private void emitComment(LineBuffer buffer, String comment) throws IOException {
         // PGN comments cannot contain '}'.
         String safe = comment.replace('}', ')');
         buffer.emit("{" + safe + "}");

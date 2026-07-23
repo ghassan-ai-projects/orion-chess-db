@@ -34,6 +34,13 @@ import java.util.function.Function;
  */
 final class DbTools {
 
+    private static final Set<String> SEARCH_FILTER_ARGUMENTS = Set.of(
+        "white", "black", "player", "event", "site", "eco", "opening",
+        "result", "date_from", "date_to", "min_elo", "max_elo", "min_ply",
+        "max_ply", "opening_line", "contains_fen", "material", "max_pieces",
+        "motif", "pawn_feature", "comment_contains", "tags", "exclude_tags",
+        "annotated");
+
     /** Thrown for user-visible tool errors (bad arguments, missing games...). */
     private static final class ToolError extends RuntimeException {
         ToolError(String message) {
@@ -80,7 +87,9 @@ final class DbTools {
         JsonObject args = params.has("arguments") && params.get("arguments").isJsonObject()
             ? params.getAsJsonObject("arguments") : new JsonObject();
         try {
-            return successResult(tool.handler().apply(args));
+            synchronized (db) {
+                return successResult(tool.handler().apply(args));
+            }
         } catch (ToolError e) {
             return errorResult(e.getMessage());
         } catch (IllegalArgumentException e) {
@@ -159,6 +168,9 @@ final class DbTools {
                 str("pawn_feature", "Pawn structure feature: iqp, doubled, isolated, passed, "
                     + "advanced-passer (prefix with 'white-'/'black-' for one side)"),
                 str("comment_contains", "Game commentary contains this text"),
+                stringArray("tags", "Categorical game tags to match"),
+                str("tag_mode", "How tags match: 'all' (default) or 'any'"),
+                stringArray("exclude_tags", "Exclude games carrying any of these tags"),
                 bool("annotated", "true: only games with comments/variations/NAGs; "
                     + "false: only bare games"),
                 str("sort_by", "'date', 'white_elo', 'black_elo', 'avg_elo', 'ply_count', "
@@ -248,6 +260,70 @@ final class DbTools {
                 "game_id", "key"),
             this::setTag);
 
+        add("update_game_tags",
+            "Add, remove, or replace categorical tags on one or more games. Tags are "
+            + "case-insensitive, normalized, and stored in the portable OrionTags PGN "
+            + "header. Use set to replace all tags, or add/remove for incremental updates.",
+            schema(props(
+                intArray("game_ids", "One or more game ids to update"),
+                stringArray("add", "Tags to add"),
+                stringArray("remove", "Tags to remove"),
+                stringArray("set", "Exact replacement tags; an empty array clears all")),
+                "game_ids"),
+            this::updateGameTags);
+
+        add("tag_games_by_search",
+            "Add, remove, or replace categorical tags on every game matching search "
+            + "filters. At least one filter is required unless match_all is true.",
+            schema(props(
+                str("white", "White player name contains this"),
+                str("black", "Black player name contains this"),
+                str("player", "Either player's name contains this"),
+                str("event", "Event name contains this"),
+                str("site", "Site contains this"),
+                str("eco", "ECO exact value, prefix, or range"),
+                str("opening", "Opening name contains this"),
+                str("result", "Game result"),
+                str("date_from", "Inclusive lower date bound"),
+                str("date_to", "Inclusive upper date bound"),
+                integer("min_elo", "Minimum Elo"),
+                integer("max_elo", "Maximum Elo"),
+                str("elo_mode", "either, both, or average"),
+                integer("min_ply", "Minimum half-moves"),
+                integer("max_ply", "Maximum half-moves"),
+                str("opening_line", "Position reached after these moves"),
+                str("contains_fen", "Position reached as FEN"),
+                str("material", "Material balance reached"),
+                integer("max_pieces", "Maximum pieces reached"),
+                str("motif", "Tactical motif"),
+                str("pawn_feature", "Pawn feature"),
+                str("comment_contains", "Comment text"),
+                stringArray("tags", "Required categorical tags"),
+                str("tag_mode", "all or any"),
+                stringArray("exclude_tags", "Excluded categorical tags"),
+                bool("annotated", "Whether games have annotations"),
+                bool("match_all", "Allow an empty filter to select the whole database"),
+                stringArray("add", "Tags to add"),
+                stringArray("remove", "Tags to remove"),
+                stringArray("set", "Exact replacement tags"))),
+            this::tagGamesBySearch);
+
+        add("manage_game_tag",
+            "Rename, merge, or delete a categorical tag across the database. Rename "
+            + "rejects an existing destination; merge combines into it.",
+            schema(props(
+                str("action", "rename, merge, or delete"),
+                str("source", "Tag to rename, merge, or delete"),
+                str("destination", "Required for rename and merge")),
+                "action", "source"),
+            this::manageGameTag);
+
+        add("batch_mutate",
+            "Apply multiple mutation operations as one transaction. Any invalid "
+            + "operation rolls back the entire batch; a successful batch saves once.",
+            schema(props(batchOperations()), "operations"),
+            this::batchMutate);
+
         add("export_pgn",
             "Export games as PGN text, or write them to a file when file_path is given. "
             + "Omit game_ids to export the whole database.",
@@ -328,6 +404,39 @@ final class DbTools {
         return p;
     }
 
+    private static JsonObject stringArray(String name, String description) {
+        JsonObject p = typed(name, "array", description);
+        JsonObject items = new JsonObject();
+        items.addProperty("type", "string");
+        p.add("items", items);
+        return p;
+    }
+
+    private static JsonObject batchOperations() {
+        JsonObject p = typed("operations", "array",
+            "Ordered mutation objects. Each needs an action plus that action's normal "
+            + "arguments.");
+        JsonObject items = new JsonObject();
+        items.addProperty("type", "object");
+        items.add("properties", props(
+            str("action", "add_game, import_pgn, delete_game, set_tag, "
+                + "or update_game_tags"),
+            str("pgn_text", "PGN text for add_game or import_pgn"),
+            str("file_path", "PGN file for import_pgn"),
+            integer("game_id", "Game id for delete_game or set_tag"),
+            str("key", "PGN tag key for set_tag"),
+            str("value", "PGN tag value for set_tag; omit to remove"),
+            intArray("game_ids", "Game ids for update_game_tags"),
+            stringArray("add", "Categorical tags to add"),
+            stringArray("remove", "Categorical tags to remove"),
+            stringArray("set", "Replacement categorical tags")));
+        JsonArray required = new JsonArray();
+        required.add("action");
+        items.add("required", required);
+        p.add("items", items);
+        return p;
+    }
+
     // ==================================================================
     // Argument helpers
     // ==================================================================
@@ -361,6 +470,34 @@ final class DbTools {
         Integer i = optInt(args, key);
         if (i == null) throw new ToolError("Missing required argument: " + key);
         return i;
+    }
+
+    private static List<String> optStrings(JsonObject args, String key) {
+        JsonElement element = args.get(key);
+        if (element == null || element.isJsonNull()) return List.of();
+        if (!element.isJsonArray()) {
+            throw new ToolError(key + " must be an array");
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonElement item : element.getAsJsonArray()) {
+            values.add(item.getAsString());
+        }
+        return values;
+    }
+
+    private static List<Integer> reqInts(JsonObject args, String key) {
+        JsonElement element = args.get(key);
+        if (element == null || !element.isJsonArray()) {
+            throw new ToolError("Missing required array: " + key);
+        }
+        List<Integer> values = new ArrayList<>();
+        for (JsonElement item : element.getAsJsonArray()) {
+            values.add(item.getAsInt());
+        }
+        if (values.isEmpty()) {
+            throw new ToolError(key + " must contain at least one id");
+        }
+        return values;
     }
 
     // ==================================================================
@@ -408,6 +545,7 @@ final class DbTools {
         result.addProperty("annotated_games", annotated);
         result.add("top_ecos", topCounts(ecoCounts, 10));
         result.add("top_openings", topCounts(openingCounts, 10));
+        result.add("top_tags", topCounts(db.gameTagCounts(), 20));
         return result;
     }
 
@@ -426,7 +564,33 @@ final class DbTools {
     }
 
     private JsonObject searchGames(JsonObject args) {
-        Search search = db.search();
+        Search search = applySearchFilters(db.search(), args);
+        String s;
+        if ((s = optString(args, "sort_by")) != null) {
+            search.sortBy(Search.Sort.valueOf(s.toUpperCase(Locale.ROOT)),
+                Boolean.TRUE.equals(optBool(args, "descending")));
+        } else if (Boolean.TRUE.equals(optBool(args, "descending"))) {
+            search.sortBy(Search.Sort.ID, true);
+        }
+
+        int limit = optInt(args, "limit") != null ? optInt(args, "limit") : 25;
+        limit = Math.max(1, Math.min(limit, 500));
+        int total = search.count();
+        Integer offset = optInt(args, "offset");
+        search.limit(limit).offset(offset != null ? offset : 0);
+
+        JsonArray games = new JsonArray();
+        for (Game game : search.find()) {
+            games.add(gameSummary(game));
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("total_count", total);
+        result.addProperty("returned", games.size());
+        result.add("games", games);
+        return result;
+    }
+
+    private static Search applySearchFilters(Search search, JsonObject args) {
         String s;
         if ((s = optString(args, "white")) != null) search.white(s);
         if ((s = optString(args, "black")) != null) search.black(s);
@@ -453,30 +617,22 @@ final class DbTools {
         if ((s = optString(args, "motif")) != null) search.motif(s);
         if ((s = optString(args, "pawn_feature")) != null) search.pawnFeature(s);
         if ((s = optString(args, "comment_contains")) != null) search.commentContains(s);
+        List<String> tags = optStrings(args, "tags");
+        if (!tags.isEmpty()) {
+            String mode = optString(args, "tag_mode");
+            if (mode == null || mode.equalsIgnoreCase("all")) {
+                search.tags(tags);
+            } else if (mode.equalsIgnoreCase("any")) {
+                search.anyTags(tags);
+            } else {
+                throw new IllegalArgumentException("tag_mode must be 'all' or 'any'");
+            }
+        }
+        List<String> excludedTags = optStrings(args, "exclude_tags");
+        if (!excludedTags.isEmpty()) search.withoutTags(excludedTags);
         Boolean b;
         if ((b = optBool(args, "annotated")) != null) search.annotated(b);
-        if ((s = optString(args, "sort_by")) != null) {
-            search.sortBy(Search.Sort.valueOf(s.toUpperCase(Locale.ROOT)),
-                Boolean.TRUE.equals(optBool(args, "descending")));
-        } else if (Boolean.TRUE.equals(optBool(args, "descending"))) {
-            search.sortBy(Search.Sort.ID, true);
-        }
-
-        int limit = optInt(args, "limit") != null ? optInt(args, "limit") : 25;
-        limit = Math.max(1, Math.min(limit, 500));
-        int total = search.count();
-        Integer offset = optInt(args, "offset");
-        search.limit(limit).offset(offset != null ? offset : 0);
-
-        JsonArray games = new JsonArray();
-        for (Game game : search.find()) {
-            games.add(gameSummary(game));
-        }
-        JsonObject result = new JsonObject();
-        result.addProperty("total_count", total);
-        result.addProperty("returned", games.size());
-        result.add("games", games);
-        return result;
+        return search;
     }
 
     private JsonObject getGame(JsonObject args) {
@@ -684,38 +840,69 @@ final class DbTools {
     }
 
     private JsonObject importPgn(JsonObject args) {
+        JsonObject result = importPgnWithoutSave(args);
+        if (result.get("games_added").getAsInt() > 0) autoSave();
+        return result;
+    }
+
+    private JsonObject importPgnWithoutSave(JsonObject args) {
         String text = optString(args, "pgn_text");
         String filePath = optString(args, "file_path");
         if ((text == null) == (filePath == null)) {
             throw new ToolError("Provide exactly one of pgn_text or file_path");
         }
-        if (filePath != null) {
-            try {
-                text = com.oriondb.pgn.PgnReader.readFileText(Path.of(filePath));
-            } catch (IOException e) {
-                throw new ToolError("Cannot read " + filePath + ": " + e.getMessage());
-            }
+        Database.ImportReport report;
+        try {
+            report = filePath != null
+                ? db.importFile(Path.of(filePath))
+                : db.importPgn(text);
+        } catch (IOException e) {
+            throw new ToolError("Cannot read " + filePath + ": " + e.getMessage());
         }
-        Database.ImportReport report = db.importPgn(text);
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("games_added", report.gamesAdded());
         result.addProperty("duplicates_skipped", report.duplicatesSkipped());
+        result.addProperty("games_rejected", report.gamesRejected());
         result.addProperty("game_count", db.gameCount());
         JsonArray warnings = new JsonArray();
         for (String warning : report.warnings()) warnings.add(warning);
         result.add("warnings", warnings);
+        JsonArray errors = new JsonArray();
+        for (Database.ImportError error : report.errors()) {
+            JsonObject item = new JsonObject();
+            item.addProperty("game_number", error.gameNumber());
+            item.addProperty("white", error.white());
+            item.addProperty("black", error.black());
+            item.addProperty("code", error.code());
+            item.addProperty("message", error.message());
+            errors.add(item);
+        }
+        result.add("errors", errors);
         return result;
     }
 
     private JsonObject addGame(JsonObject args) {
+        JsonObject result = addGameWithoutSave(args);
+        autoSave();
+        return result;
+    }
+
+    private JsonObject addGameWithoutSave(JsonObject args) {
         String text = reqString(args, "pgn_text");
-        var parsed = new com.oriondb.pgn.PgnReader().readString(text);
+        var parsed = new com.oriondb.pgn.PgnReader(
+            com.oriondb.pgn.PgnReader.ValidationMode.STRICT).readString(text);
+        if (!parsed.rejectedGames().isEmpty()) {
+            var rejection = parsed.rejectedGames().get(0);
+            String reason = rejection.errors().isEmpty()
+                ? "strict validation failed"
+                : rejection.errors().get(0).message();
+            throw new ToolError(
+                "Game " + rejection.gameNumber() + " rejected: " + reason);
+        }
         if (parsed.games().size() != 1) {
             throw new ToolError("Expected exactly one game, found " + parsed.games().size());
         }
         int id = db.add(parsed.games().get(0));
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("game_id", id);
         result.addProperty("game_count", db.gameCount());
@@ -726,12 +913,17 @@ final class DbTools {
     }
 
     private JsonObject deleteGame(JsonObject args) {
+        JsonObject result = deleteGameWithoutSave(args);
+        autoSave();
+        return result;
+    }
+
+    private JsonObject deleteGameWithoutSave(JsonObject args) {
         int id = reqInt(args, "game_id");
         Game game = db.game(id);
         if (game == null) throw new ToolError("No game with id " + id);
         String description = game.toString();
         db.delete(id);
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("deleted", description);
         result.addProperty("game_count", db.gameCount());
@@ -739,13 +931,18 @@ final class DbTools {
     }
 
     private JsonObject setTag(JsonObject args) {
+        JsonObject result = setTagWithoutSave(args);
+        autoSave();
+        return result;
+    }
+
+    private JsonObject setTagWithoutSave(JsonObject args) {
         int id = reqInt(args, "game_id");
         String key = reqString(args, "key");
         String value = optString(args, "value");
         if (!db.setTag(id, key, value)) {
             throw new ToolError("No game with id " + id);
         }
-        autoSave();
         JsonObject result = new JsonObject();
         result.addProperty("game_id", id);
         result.addProperty("tag", key);
@@ -755,6 +952,216 @@ final class DbTools {
             result.addProperty("removed", true);
         }
         return result;
+    }
+
+    private JsonObject updateGameTags(JsonObject args) {
+        JsonObject result = updateGameTagsWithoutSave(args);
+        if (result.get("games_updated").getAsInt() > 0) autoSave();
+        return result;
+    }
+
+    private JsonObject updateGameTagsWithoutSave(JsonObject args) {
+        List<Integer> ids = reqInts(args, "game_ids");
+        boolean hasSet = args.has("set") && !args.get("set").isJsonNull();
+        List<String> replacement = optStrings(args, "set");
+        List<String> add = optStrings(args, "add");
+        List<String> remove = optStrings(args, "remove");
+        if (hasSet && (!add.isEmpty() || !remove.isEmpty())) {
+            throw new ToolError("set cannot be combined with add or remove");
+        }
+        if (!hasSet && add.isEmpty() && remove.isEmpty()) {
+            throw new ToolError("Provide set, add, or remove");
+        }
+
+        Database.TagUpdateReport report = hasSet
+            ? db.setGameTags(ids, replacement)
+            : db.updateGameTags(ids, add, remove);
+
+        JsonObject result = new JsonObject();
+        result.addProperty("games_updated", report.gamesUpdated());
+        result.addProperty("games_unchanged", report.gamesUnchanged());
+        JsonArray missing = new JsonArray();
+        for (int id : report.missingGameIds()) missing.add(id);
+        result.add("missing_game_ids", missing);
+
+        JsonArray games = new JsonArray();
+        for (int id : ids) {
+            Game game = db.game(id);
+            if (game == null) continue;
+            JsonObject item = new JsonObject();
+            item.addProperty("game_id", id);
+            JsonArray gameTags = new JsonArray();
+            for (String tag : game.gameTags()) gameTags.add(tag);
+            item.add("game_tags", gameTags);
+            games.add(item);
+        }
+        result.add("games", games);
+        return result;
+    }
+
+    private JsonObject tagGamesBySearch(JsonObject args) {
+        JsonObject result = tagGamesBySearchWithoutSave(args);
+        if (result.get("games_updated").getAsInt() > 0) autoSave();
+        return result;
+    }
+
+    private JsonObject tagGamesBySearchWithoutSave(JsonObject args) {
+        if (!hasSearchFilter(args)
+                && !Boolean.TRUE.equals(optBool(args, "match_all"))) {
+            throw new ToolError(
+                "Provide at least one search filter, or set match_all to true");
+        }
+        boolean hasSet = args.has("set") && !args.get("set").isJsonNull();
+        List<String> replacement = optStrings(args, "set");
+        List<String> add = optStrings(args, "add");
+        List<String> remove = optStrings(args, "remove");
+        if (hasSet && (!add.isEmpty() || !remove.isEmpty())) {
+            throw new ToolError("set cannot be combined with add or remove");
+        }
+        if (!hasSet && add.isEmpty() && remove.isEmpty()) {
+            throw new ToolError("Provide set, add, or remove");
+        }
+
+        Search search = applySearchFilters(db.search(), args);
+        Database.TagUpdateReport report = hasSet
+            ? search.setGameTags(replacement)
+            : search.updateGameTags(add, remove);
+        JsonObject result = new JsonObject();
+        result.addProperty("games_updated", report.gamesUpdated());
+        result.addProperty("games_unchanged", report.gamesUnchanged());
+        result.addProperty(
+            "games_matched", report.gamesUpdated() + report.gamesUnchanged());
+        return result;
+    }
+
+    private static boolean hasSearchFilter(JsonObject args) {
+        for (String key : SEARCH_FILTER_ARGUMENTS) {
+            JsonElement value = args.get(key);
+            if (value == null || value.isJsonNull()) continue;
+            if (value.isJsonArray() && value.getAsJsonArray().isEmpty()) continue;
+            if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+                    && value.getAsString().isBlank()) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private JsonObject manageGameTag(JsonObject args) {
+        JsonObject result = manageGameTagWithoutSave(args);
+        if (result.get("games_updated").getAsInt() > 0) autoSave();
+        return result;
+    }
+
+    private JsonObject manageGameTagWithoutSave(JsonObject args) {
+        String action = reqString(args, "action").toLowerCase(Locale.ROOT);
+        String source = reqString(args, "source");
+        String destination = optString(args, "destination");
+        Database.TagUpdateReport report;
+        switch (action) {
+            case "rename":
+                if (destination == null) {
+                    throw new ToolError("rename requires destination");
+                }
+                report = db.renameGameTag(source, destination);
+                break;
+            case "merge":
+                if (destination == null) {
+                    throw new ToolError("merge requires destination");
+                }
+                report = db.mergeGameTag(source, destination);
+                break;
+            case "delete":
+                if (destination != null) {
+                    throw new ToolError("delete does not accept destination");
+                }
+                report = db.deleteGameTag(source);
+                break;
+            default:
+                throw new ToolError("action must be rename, merge, or delete");
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("action", action);
+        result.addProperty("source", source);
+        if (destination != null) result.addProperty("destination", destination);
+        result.addProperty("games_updated", report.gamesUpdated());
+        result.addProperty("games_unchanged", report.gamesUnchanged());
+        return result;
+    }
+
+    private JsonObject batchMutate(JsonObject args) {
+        JsonElement operationsElement = args.get("operations");
+        if (operationsElement == null || !operationsElement.isJsonArray()) {
+            throw new ToolError("Missing required array: operations");
+        }
+        JsonArray operations = operationsElement.getAsJsonArray();
+        if (operations.isEmpty()) {
+            throw new ToolError("operations must contain at least one operation");
+        }
+
+        try {
+            return db.transactionAndSave(ignored -> {
+                JsonArray results = new JsonArray();
+                for (int i = 0; i < operations.size(); i++) {
+                    JsonElement element = operations.get(i);
+                    if (!element.isJsonObject()) {
+                        throw new ToolError(
+                            "Batch operation " + (i + 1) + " must be an object");
+                    }
+                    JsonObject operation = element.getAsJsonObject();
+                    String action = optString(operation, "action");
+                    if (action == null) {
+                        throw new ToolError(
+                            "Batch operation " + (i + 1) + " is missing action");
+                    }
+                    JsonObject operationResult;
+                    try {
+                        operationResult = mutateWithoutSave(action, operation);
+                        requireCompleteBatchOperation(action, operationResult);
+                    } catch (ToolError | IllegalArgumentException e) {
+                        throw new ToolError("Batch operation " + (i + 1) + " (" + action
+                            + ") failed: " + e.getMessage());
+                    }
+                    JsonObject item = new JsonObject();
+                    item.addProperty("action", action);
+                    item.add("result", operationResult);
+                    results.add(item);
+                }
+                JsonObject result = new JsonObject();
+                result.addProperty("operations_applied", results.size());
+                result.addProperty("game_count", db.gameCount());
+                result.add("results", results);
+                return result;
+            });
+        } catch (IOException e) {
+            throw new ToolError("Batch rolled back because saving failed: " + e.getMessage());
+        }
+    }
+
+    private JsonObject mutateWithoutSave(String action, JsonObject args) {
+        return switch (action) {
+            case "add_game" -> addGameWithoutSave(args);
+            case "import_pgn" -> importPgnWithoutSave(args);
+            case "delete_game" -> deleteGameWithoutSave(args);
+            case "set_tag" -> setTagWithoutSave(args);
+            case "update_game_tags" -> updateGameTagsWithoutSave(args);
+            default -> throw new ToolError("Unknown mutation action: " + action);
+        };
+    }
+
+    private static void requireCompleteBatchOperation(
+            String action, JsonObject result) {
+        if ("import_pgn".equals(action)
+                && result.get("games_rejected").getAsInt() > 0) {
+            throw new ToolError(
+                result.get("games_rejected").getAsInt() + " imported games were rejected");
+        }
+        if ("update_game_tags".equals(action)
+                && !result.getAsJsonArray("missing_game_ids").isEmpty()) {
+            throw new ToolError("Unknown game ids: "
+                + result.getAsJsonArray("missing_game_ids"));
+        }
     }
 
     private JsonObject exportPgn(JsonObject args) {
@@ -769,19 +1176,20 @@ final class DbTools {
         } else {
             games.addAll(db.games());
         }
-        String pgn = new PgnWriter().write(games);
         JsonObject result = new JsonObject();
         result.addProperty("games_exported", games.size());
 
         String filePath = optString(args, "file_path");
         if (filePath != null) {
-            try {
-                Files.writeString(Path.of(filePath), pgn, StandardCharsets.UTF_8);
+            try (var writer =
+                     Files.newBufferedWriter(Path.of(filePath), StandardCharsets.UTF_8)) {
+                new PgnWriter().write(games, writer);
             } catch (IOException e) {
                 throw new ToolError("Cannot write " + filePath + ": " + e.getMessage());
             }
             result.addProperty("file_path", filePath);
         } else {
+            String pgn = new PgnWriter().write(games);
             if (pgn.length() > 400_000) {
                 throw new ToolError("Export is " + pgn.length()
                     + " characters; pass file_path to write it to a file instead");
@@ -831,6 +1239,9 @@ final class DbTools {
         String opening = game.tag("Opening");
         if (opening == null && data != null) opening = data.openingName();
         if (opening != null) summary.addProperty("opening", opening);
+        JsonArray tags = new JsonArray();
+        for (String tag : game.gameTags()) tags.add(tag);
+        summary.add("game_tags", tags);
         summary.addProperty("ply_count", game.plyCount());
         if (game.hasAnnotations()) summary.addProperty("annotated", true);
         return summary;

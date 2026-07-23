@@ -85,8 +85,10 @@ class McpServerTest {
     void toolsList() {
         JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
         JsonArray tools = response.getAsJsonObject("result").getAsJsonArray("tools");
-        assertEquals(13, tools.size());
+        assertEquals(17, tools.size());
         boolean foundSearch = false;
+        boolean foundGameTags = false;
+        boolean foundBatch = false;
         for (var tool : tools) {
             JsonObject t = tool.getAsJsonObject();
             assertTrue(t.has("name"));
@@ -94,8 +96,12 @@ class McpServerTest {
             assertEquals("object",
                 t.getAsJsonObject("inputSchema").get("type").getAsString());
             if (t.get("name").getAsString().equals("search_games")) foundSearch = true;
+            if (t.get("name").getAsString().equals("update_game_tags")) foundGameTags = true;
+            if (t.get("name").getAsString().equals("batch_mutate")) foundBatch = true;
         }
         assertTrue(foundSearch);
+        assertTrue(foundGameTags);
+        assertTrue(foundBatch);
     }
 
     @Test
@@ -178,6 +184,95 @@ class McpServerTest {
     }
 
     @Test
+    void bulkGameTagsAndTagSearch() {
+        int morphy = db.search().player("Morphy").find().get(0).id();
+        int kasparov = db.search().player("Kasparov").find().get(0).id();
+
+        JsonObject updated = payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + morphy + "," + kasparov
+                + "],\"add\":[\"Tactics\",\"Reviewed\"]}"));
+        assertEquals(2, updated.get("games_updated").getAsInt());
+        assertEquals(2, updated.getAsJsonArray("games").size());
+
+        payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + morphy + "],\"add\":[\"Study\"]}"));
+
+        JsonObject all = payload(callTool("search_games",
+            "{\"tags\":[\"tactics\",\"study\"],\"tag_mode\":\"all\"}"));
+        assertEquals(1, all.get("total_count").getAsInt());
+        JsonObject game = all.getAsJsonArray("games").get(0).getAsJsonObject();
+        assertEquals(morphy, game.get("game_id").getAsInt());
+        assertTrue(game.getAsJsonArray("game_tags").toString().contains("study"));
+
+        JsonObject excluded = payload(callTool("search_games",
+            "{\"tags\":[\"tactics\"],\"exclude_tags\":[\"study\"]}"));
+        assertEquals(1, excluded.get("total_count").getAsInt());
+        assertEquals(kasparov, excluded.getAsJsonArray("games")
+            .get(0).getAsJsonObject().get("game_id").getAsInt());
+    }
+
+    @Test
+    void batchMutationsCommitTogetherOrRollBackTogether() {
+        int morphy = db.search().player("Morphy").find().get(0).id();
+        int kasparov = db.search().player("Kasparov").find().get(0).id();
+
+        JsonObject committed = payload(callTool("batch_mutate", """
+            {"operations":[
+              {"action":"set_tag","game_id":%d,"key":"Annotator","value":"Orion"},
+              {"action":"update_game_tags","game_ids":[%d],"add":["study"]}
+            ]}
+            """.formatted(morphy, kasparov)));
+        assertEquals(2, committed.get("operations_applied").getAsInt());
+        assertEquals("Orion", db.game(morphy).tag("Annotator"));
+        assertTrue(db.game(kasparov).hasGameTag("study"));
+
+        JsonObject failed = callTool("batch_mutate", """
+            {"operations":[
+              {"action":"set_tag","game_id":%d,"key":"Event","value":"Must Roll Back"},
+              {"action":"delete_game","game_id":99999}
+            ]}
+            """.formatted(morphy));
+        assertTrue(failed.get("isError").getAsBoolean());
+        assertNotEquals("Must Roll Back", db.game(morphy).event());
+    }
+
+    @Test
+    void tagsCanBeManagedAndAppliedBySearch() {
+        int morphy = db.search().player("Morphy").find().get(0).id();
+        int kasparov = db.search().player("Kasparov").find().get(0).id();
+        payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + morphy + "],\"add\":[\"inbox\"]}"));
+        payload(callTool("update_game_tags",
+            "{\"game_ids\":[" + kasparov + "],\"add\":[\"reviewed\"]}"));
+
+        JsonObject selected = payload(callTool("tag_games_by_search",
+            "{\"player\":\"Morphy\",\"add\":[\"study\"]}"));
+        assertEquals(1, selected.get("games_matched").getAsInt());
+        assertTrue(db.game(morphy).hasGameTag("study"));
+        assertFalse(db.game(kasparov).hasGameTag("study"));
+
+        JsonObject unsafe = callTool("tag_games_by_search",
+            "{\"add\":[\"accidental\"]}");
+        assertTrue(unsafe.get("isError").getAsBoolean());
+        assertEquals(0, db.search().tag("accidental").count());
+
+        JsonObject renamed = payload(callTool("manage_game_tag",
+            "{\"action\":\"rename\",\"source\":\"inbox\",\"destination\":\"queue\"}"));
+        assertEquals(1, renamed.get("games_updated").getAsInt());
+        assertTrue(db.game(morphy).hasGameTag("queue"));
+
+        JsonObject conflict = callTool("manage_game_tag",
+            "{\"action\":\"rename\",\"source\":\"queue\",\"destination\":\"reviewed\"}");
+        assertTrue(conflict.get("isError").getAsBoolean());
+        assertTrue(db.game(morphy).hasGameTag("queue"));
+
+        JsonObject merged = payload(callTool("manage_game_tag",
+            "{\"action\":\"merge\",\"source\":\"queue\",\"destination\":\"reviewed\"}"));
+        assertEquals(1, merged.get("games_updated").getAsInt());
+        assertTrue(db.game(morphy).hasGameTag("reviewed"));
+    }
+
+    @Test
     void importAndExportTools() {
         JsonObject imported = payload(callTool("import_pgn",
             "{\"pgn_text\":\"[White \\\"A\\\"]\\n[Black \\\"B\\\"]\\n[Result \\\"*\\\"]\\n\\n1. Nf3 *\"}"));
@@ -186,6 +281,24 @@ class McpServerTest {
         JsonObject exported = payload(callTool("export_pgn", "{}"));
         assertEquals(7, exported.get("games_exported").getAsInt());
         assertTrue(exported.get("pgn").getAsString().contains("Morphy"));
+    }
+
+    @Test
+    void strictImportErrorsAreStructured() {
+        JsonObject imported = payload(callTool("import_pgn",
+            "{\"pgn_text\":\"[White \\\"Bad\\\"]\\n[Black \\\"Move\\\"]\\n"
+                + "[Result \\\"*\\\"]\\n\\n1. e4 e5 2. Nf6 *\"}"));
+        assertEquals(0, imported.get("games_added").getAsInt());
+        assertEquals(1, imported.get("games_rejected").getAsInt());
+        JsonObject error = imported.getAsJsonArray("errors").get(0).getAsJsonObject();
+        assertEquals(1, error.get("game_number").getAsInt());
+        assertEquals("ILLEGAL_MAINLINE_MOVE", error.get("code").getAsString());
+
+        JsonObject add = callTool("add_game",
+            "{\"pgn_text\":\"[Result \\\"*\\\"]\\n\\n1. e4 e5 2. Nf6 *\"}");
+        assertTrue(add.get("isError").getAsBoolean());
+        assertTrue(add.getAsJsonArray("content").get(0).getAsJsonObject()
+            .get("text").getAsString().contains("rejected"));
     }
 
     @Test

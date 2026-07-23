@@ -3,7 +3,13 @@ package com.oriondb.pgn;
 import com.oriondb.model.Game;
 import com.oriondb.model.MoveNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -120,6 +126,60 @@ class PgnTest {
     }
 
     @Test
+    void streamingReaderPreservesBoundariesErrorsAndOrdinals() throws Exception {
+        String pgn = """
+            [White "Bad ] Name"]
+            [Black "Move"]
+            [Result "*"]
+
+            {Text containing 1-0 and [Event "not a tag"].}
+            1. e4 e5 2. Nf6
+
+            [White "Good"]
+            [Black "Game"]
+            [Result "*"]
+
+            1. d4 d5 *
+            """;
+        PgnReader reader = new PgnReader(PgnReader.ValidationMode.STRICT);
+        PgnReader.ParseResult streamed = reader.read(new StringReader(pgn));
+
+        assertEquals(1, streamed.rejectedGames().size());
+        assertEquals(1, streamed.rejectedGames().get(0).gameNumber());
+        assertEquals("Bad ] Name", streamed.rejectedGames().get(0).tags().get("White"));
+        assertEquals(1, streamed.games().size());
+        assertEquals(2, streamed.parsedGames().get(0).gameNumber());
+        assertEquals("Good", streamed.games().get(0).white());
+    }
+
+    @Test
+    void fileReaderFallsBackToLatin1WithoutLoadingTheWholeFile(
+            @TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("latin1.pgn");
+        String pgn = """
+            [White "José"]
+            [Black "Müller"]
+            [Result "*"]
+
+            1. e4 *
+            """;
+        Files.write(file, pgn.getBytes(StandardCharsets.ISO_8859_1));
+
+        Game game = new PgnReader().readFile(file).games().get(0);
+        assertEquals("José", game.white());
+        assertEquals("Müller", game.black());
+    }
+
+    @Test
+    void writerCanStreamTheSameCanonicalOutput() throws Exception {
+        List<Game> games = new PgnReader().readString(ANNOTATED).games();
+        StringWriter streamed = new StringWriter();
+        new PgnWriter().write(games, streamed);
+
+        assertEquals(new PgnWriter().write(games), streamed.toString());
+    }
+
+    @Test
     void gluedMoveNumbersAndZeroCastling() {
         String pgn = """
             [Result "*"]
@@ -149,6 +209,51 @@ class PgnTest {
         assertEquals(List.of("e4", "e5"), result.games().get(0).mainlineSans());
         assertFalse(result.warnings().isEmpty());
         assertTrue(result.warnings().get(0).contains("Nf6"));
+    }
+
+    @Test
+    void strictModeRejectsIllegalGameAndContinues() {
+        String pgn = """
+            [White "Bad"]
+            [Black "Move"]
+            [Result "*"]
+
+            1. e4 e5 2. Nf6 *
+
+            [White "Good"]
+            [Black "Game"]
+            [Result "*"]
+
+            1. d4 d5 *
+            """;
+        PgnReader.ParseResult result =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readString(pgn);
+
+        assertEquals(1, result.games().size());
+        assertEquals("Good", result.games().get(0).white());
+        assertEquals(2, result.parsedGames().get(0).gameNumber());
+        assertEquals(1, result.rejectedGames().size());
+        PgnReader.RejectedGame rejected = result.rejectedGames().get(0);
+        assertEquals(1, rejected.gameNumber());
+        assertEquals("Bad", rejected.tags().get("White"));
+        assertEquals("ILLEGAL_MAINLINE_MOVE", rejected.errors().get(0).code());
+    }
+
+    @Test
+    void strictModeRejectsInvalidFen() {
+        PgnReader.ParseResult result =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readString("""
+                [White "Bad FEN"]
+                [Result "*"]
+                [SetUp "1"]
+                [FEN "not a fen"]
+
+                1. e4 *
+                """);
+
+        assertTrue(result.games().isEmpty());
+        assertEquals("INVALID_FEN",
+            result.rejectedGames().get(0).errors().get(0).code());
     }
 
     @Test
@@ -246,5 +351,75 @@ class PgnTest {
         String written = new PgnWriter().write(game);
         Game again = new PgnReader().readString(written).games().get(0);
         assertEquals("The \"Great\" Open", again.event());
+    }
+
+    @Test
+    void unterminatedTagValueDoesNotAbortTheParse() {
+        // Game 1's Event quote is never closed. The tag string must stop at
+        // the end of the line (a tag pair never spans lines), the tag is
+        // dropped with a warning, and both games survive.
+        String pgn = """
+            [Event "Unclosed
+            [Site "Q"]
+            [Result "*"]
+
+            1. e4 *
+
+            [Event "Fine Game"]
+            [Result "*"]
+
+            1. d4 *
+            """;
+        PgnReader.ParseResult result = new PgnReader().readString(pgn);
+        assertEquals(2, result.games().size());
+        Game first = result.games().get(0);
+        assertEquals("?", first.event(), "unterminated tag dropped");
+        assertEquals("Q", first.site(), "following tags still parse");
+        assertEquals(List.of("e4"), first.mainlineSans());
+        assertEquals("Fine Game", result.games().get(1).event());
+        assertEquals(List.of("d4"), result.games().get(1).mainlineSans());
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("unterminated tag")),
+            () -> result.warnings().toString());
+
+        // A trailing backslash must not let the escape consume the newline.
+        String escaped = "[Event \"Trailing\\\n[Result \"*\"]\n\n1. e4 *";
+        PgnReader.ParseResult escapedResult = new PgnReader().readString(escaped);
+        assertEquals(1, escapedResult.games().size());
+        assertEquals(List.of("e4"), escapedResult.games().get(0).mainlineSans());
+    }
+
+    @Test
+    void unterminatedTagValueStrictModeStillParsesTheGames() {
+        String pgn = """
+            [Event "Unclosed
+            [Result "*"]
+
+            1. e4 *
+            """;
+        PgnReader.ParseResult result =
+            new PgnReader(PgnReader.ValidationMode.STRICT).readString(pgn);
+        assertEquals(1, result.games().size());
+        assertEquals(0, result.rejectedGames().size(),
+            "a dropped tag is a warning, not a game rejection");
+        assertEquals(List.of("e4"), result.games().get(0).mainlineSans());
+    }
+
+    @Test
+    void pathologicalVariationNestingDoesNotOverflow() {
+        // Each nested variation replays the same legal reply, so every level
+        // parses; without a depth cap this recursed once per '('.
+        int levels = 5_000;
+        String pgn = "[Result \"*\"]\n\n1. e4 e5 "
+            + "(1... d5 ".repeat(levels) + ")".repeat(levels) + " *";
+        PgnReader.ParseResult result = new PgnReader().readString(pgn);
+        assertEquals(1, result.games().size());
+        Game game = result.games().get(0);
+        assertEquals(List.of("e4", "e5"), game.mainlineSans());
+        // The first cap-worth of levels is preserved.
+        MoveNode e5 = game.root().next();
+        assertEquals(1, e5.variations().size());
+        assertEquals("d5", e5.variations().get(0).san());
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("nesting")),
+            () -> "expected a nesting warning, got: " + result.warnings());
     }
 }

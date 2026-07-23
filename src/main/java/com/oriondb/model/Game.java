@@ -6,6 +6,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * A chess game: PGN tags plus a move tree.
@@ -15,11 +17,13 @@ import java.util.Objects;
  */
 public final class Game {
     public static final String UNKNOWN_DATE = "????.??.??";
+    private static final Pattern TAG_NAME = Pattern.compile("[A-Za-z0-9_]+");
 
     private int id;
     private final LinkedHashMap<String, String> tags;
     private MoveNode root;              // first mainline move, or null
     private String gameComment;         // comment before the first move
+    private boolean readOnly;
 
     public Game() {
         this.id = -1;
@@ -28,7 +32,8 @@ public final class Game {
 
     public Game(Map<String, String> tags, MoveNode root) {
         this.id = -1;
-        this.tags = new LinkedHashMap<>(tags);
+        this.tags = new LinkedHashMap<>();
+        Objects.requireNonNull(tags, "tags").forEach(this::setTag);
         this.root = root;
     }
 
@@ -42,6 +47,7 @@ public final class Game {
 
     /** Assigned by the database layer. */
     public void setId(int id) {
+        requireMutable();
         this.id = id;
     }
 
@@ -62,6 +68,8 @@ public final class Game {
     }
 
     public void setTag(String key, String value) {
+        requireMutable();
+        validateTag(key, value);
         if (value == null) {
             tags.remove(key);
         } else {
@@ -103,6 +111,15 @@ public final class Game {
 
     public String opening() {
         return tag("Opening");
+    }
+
+    /** Normalized categorical tags stored in the portable OrionTags PGN header. */
+    public Set<String> gameTags() {
+        return GameTags.parse(tag(GameTags.PGN_TAG));
+    }
+
+    public boolean hasGameTag(String gameTag) {
+        return gameTags().contains(GameTags.normalize(gameTag));
     }
 
     public Integer whiteElo() {
@@ -159,6 +176,7 @@ public final class Game {
     }
 
     public void setRoot(MoveNode root) {
+        requireMutable();
         this.root = root;
     }
 
@@ -168,7 +186,45 @@ public final class Game {
     }
 
     public void setGameComment(String comment) {
+        requireMutable();
         this.gameComment = comment;
+    }
+
+    /** Deep, mutable copy suitable for editing and {@code Database.replace}. */
+    public Game copy() {
+        Game copy = new Game(tags, root != null ? root.copy() : null);
+        copy.id = id;
+        copy.gameComment = gameComment;
+        return copy;
+    }
+
+    /** Make this game and its move tree read-only. Used by the database. */
+    public void makeReadOnly() {
+        if (readOnly) return;
+        if (root != null) root.makeReadOnly();
+        readOnly = true;
+    }
+
+    public boolean isReadOnly() {
+        return readOnly;
+    }
+
+    private void requireMutable() {
+        if (readOnly) {
+            throw new UnsupportedOperationException(
+                "Database games are read-only; copy the game and call Database.replace");
+        }
+    }
+
+    private static void validateTag(String key, String value) {
+        Objects.requireNonNull(key, "tag key");
+        if (!TAG_NAME.matcher(key).matches()) {
+            throw new IllegalArgumentException(
+                "Invalid PGN tag name '" + key + "'; use letters, digits, and underscores");
+        }
+        if (value != null && (value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0)) {
+            throw new IllegalArgumentException("PGN tag values must not contain line breaks");
+        }
     }
 
     /** Mainline moves as SAN strings. */

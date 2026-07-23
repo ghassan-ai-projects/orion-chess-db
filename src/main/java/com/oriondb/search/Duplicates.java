@@ -21,6 +21,12 @@ public final class Duplicates {
     private Duplicates() {}
 
     public static List<Group> find(Database db) {
+        synchronized (db) {
+            return findLocked(db);
+        }
+    }
+
+    private static List<Group> findLocked(Database db) {
         Map<Long, List<Integer>> bySeqHash = new HashMap<>();
         for (Game game : db.games()) {
             if (game.plyCount() == 0) continue;

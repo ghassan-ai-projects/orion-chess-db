@@ -31,6 +31,7 @@ import java.util.Map;
  * oriondb game      games.pgn 17
  * oriondb player    games.pgn "Carlsen"
  * oriondb h2h       games.pgn "Kasparov" "Karpov"
+ * oriondb tag       games.pgn --ids 1,2 --add tactics,study
  * oriondb export    games.pgn --ids 1,2,3 -o out.pgn
  * oriondb dedupe    games.pgn
  * </pre>
@@ -79,6 +80,7 @@ public final class Main {
             case "game": game(dbPath, rest); break;
             case "player": player(dbPath, rest); break;
             case "h2h": h2h(dbPath, rest); break;
+            case "tag": tag(dbPath, rest); break;
             case "export": export(dbPath, rest); break;
             case "dedupe": dedupe(dbPath); break;
             default:
@@ -100,12 +102,18 @@ public final class Main {
                         --date-from --date-to --min-elo --max-elo --elo-mode
                         --opening-line "1. e4 c5" --fen FEN --material "KRP vs KR"
                         --max-pieces N --motif fork --pawn iqp --comment TEXT
+                        --tag TAG --any-tag TAG --without-tag TAG
                         --annotated --sort date|avg_elo|ply_count --desc
                         --limit N --offset N
               explorer  Opening tree: explorer db.pgn "1. e4 c5 2. Nf3"
               game      Show one game with tactics: game db.pgn <id>
               player    Player dossier: player db.pgn "Carlsen"
               h2h       Head to head: h2h db.pgn "Kasparov" "Karpov"
+              tag       Update game tags: tag db.pgn --ids 1,2 --add tactics,study
+                        Select with --player/--event/--eco/--tagged/--without-tag
+                        Use --all explicitly to select every game
+                        Manage tags with --rename OLD --to NEW, --merge OLD --into NEW,
+                        or --delete-tag TAG
               export    Write PGN: export db.pgn [--ids 1,2,3] [-o out.pgn]
               dedupe    List duplicate games
 
@@ -116,10 +124,11 @@ public final class Main {
 
     private static void mcp(Path dbPath) throws Exception {
         // stdout carries only protocol messages; announce on stderr.
-        Database db = Database.open(dbPath);
-        System.err.println("oriondb mcp: serving " + db.gameCount() + " games from " + dbPath);
-        new McpServer(db).run();
-        db.close();
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
+            System.err.println(
+                "oriondb mcp: serving " + db.gameCount() + " games from " + dbPath);
+            new McpServer(db).run();
+        }
     }
 
     private static void stats(Path dbPath) throws Exception {
@@ -149,6 +158,15 @@ public final class Main {
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
                 .limit(10)
                 .forEach(e -> System.out.printf("  %-4s %d games%n", e.getKey(), e.getValue()));
+            Map<String, Integer> tagCounts = db.gameTagCounts();
+            if (!tagCounts.isEmpty()) {
+                System.out.println("Top tags:");
+                tagCounts.entrySet().stream()
+                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                    .limit(10)
+                    .forEach(e -> System.out.printf(
+                        "  %-24s %d games%n", e.getKey(), e.getValue()));
+            }
         }
     }
 
@@ -156,13 +174,15 @@ public final class Main {
         if (args.length == 0) {
             throw new UsageException("import needs a PGN file to import");
         }
-        try (Database db = Database.open(dbPath)) {
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
             for (String file : args) {
                 long start = System.currentTimeMillis();
                 Database.ImportReport report = db.importFile(Path.of(file));
                 long ms = System.currentTimeMillis() - start;
-                System.out.printf("%s: %d games imported, %d duplicates skipped (%d ms)%n",
-                    file, report.gamesAdded(), report.duplicatesSkipped(), ms);
+                System.out.printf(
+                    "%s: %d imported, %d duplicates skipped, %d rejected (%d ms)%n",
+                    file, report.gamesAdded(), report.duplicatesSkipped(),
+                    report.gamesRejected(), ms);
                 for (String warning : report.warnings()) {
                     System.out.println("  warning: " + warning);
                 }
@@ -214,6 +234,9 @@ public final class Main {
                             case "--motif": search.motif(value); break;
                             case "--pawn": search.pawnFeature(value); break;
                             case "--comment": search.commentContains(value); break;
+                            case "--tag": search.tag(value); break;
+                            case "--any-tag": search.anyTag(value); break;
+                            case "--without-tag": search.withoutTag(value); break;
                             case "--sort": sort = value; break;
                             case "--limit": limit = Integer.parseInt(value); break;
                             case "--offset": offset = Integer.parseInt(value); break;
@@ -232,12 +255,15 @@ public final class Main {
             int total = search.count();
             List<Game> games = search.limit(limit).offset(offset).find();
             for (Game game : games) {
-                System.out.printf("#%-5d %-24s - %-24s %-7s %-10s %s %s%n",
+                String tags = game.gameTags().isEmpty()
+                    ? "" : " [" + String.join(", ", game.gameTags()) + "]";
+                System.out.printf("#%-5d %-24s - %-24s %-7s %-10s %s %s%s%n",
                     game.id(),
                     clip(game.white(), 24), clip(game.black(), 24),
                     game.result(), game.date(),
                     game.tag("ECO", ""),
-                    clip(game.tag("Opening", ""), 30));
+                    clip(game.tag("Opening", ""), 30),
+                    tags);
             }
             System.out.println(games.size() + " of " + total + " matching games shown.");
         }
@@ -360,6 +386,177 @@ public final class Main {
         }
     }
 
+    private static void tag(Path dbPath, String[] args) throws Exception {
+        List<Integer> ids = new ArrayList<>();
+        List<String> add = new ArrayList<>();
+        List<String> remove = new ArrayList<>();
+        List<String> replacement = null;
+        List<String> requiredTags = new ArrayList<>();
+        List<String> anyTags = new ArrayList<>();
+        List<String> excludedTags = new ArrayList<>();
+        String player = null;
+        String event = null;
+        String eco = null;
+        boolean selectAll = false;
+        String managementAction = null;
+        String managementSource = null;
+        String managementDestination = null;
+
+        for (int i = 0; i < args.length; i++) {
+            String flag = args[i];
+            if ("--all".equals(flag)) {
+                selectAll = true;
+                continue;
+            }
+            if (i + 1 >= args.length) {
+                throw new UsageException("Missing value for " + flag);
+            }
+            String value = args[++i];
+            switch (flag) {
+                case "--ids":
+                    for (String id : value.split(",")) {
+                        ids.add(Integer.parseInt(id.trim()));
+                    }
+                    break;
+                case "--add":
+                    add.addAll(tagList(value));
+                    break;
+                case "--remove":
+                    remove.addAll(tagList(value));
+                    break;
+                case "--set":
+                    replacement = tagList(value);
+                    break;
+                case "--player":
+                    player = value;
+                    break;
+                case "--event":
+                    event = value;
+                    break;
+                case "--eco":
+                    eco = value;
+                    break;
+                case "--tagged":
+                    requiredTags.addAll(tagList(value));
+                    break;
+                case "--any-tagged":
+                    anyTags.addAll(tagList(value));
+                    break;
+                case "--without-tag":
+                    excludedTags.addAll(tagList(value));
+                    break;
+                case "--rename":
+                case "--merge":
+                case "--delete-tag":
+                    if (managementAction != null) {
+                        throw new UsageException("Only one tag management action is allowed");
+                    }
+                    managementAction = flag;
+                    managementSource = value;
+                    break;
+                case "--to":
+                case "--into":
+                    managementDestination = value;
+                    break;
+                default:
+                    throw new UsageException("Unknown tag option: " + flag);
+            }
+        }
+
+        boolean hasSearchSelection = selectAll || player != null || event != null
+            || eco != null || !requiredTags.isEmpty() || !anyTags.isEmpty()
+            || !excludedTags.isEmpty();
+        if (managementAction == null && managementDestination != null) {
+            throw new UsageException("--to/--into requires --rename or --merge");
+        }
+        if (managementAction != null) {
+            if (!ids.isEmpty() || hasSearchSelection || replacement != null
+                    || !add.isEmpty() || !remove.isEmpty()) {
+                throw new UsageException(
+                    "Tag management cannot be combined with game selection or updates");
+            }
+            if (!"--delete-tag".equals(managementAction)
+                    && managementDestination == null) {
+                throw new UsageException(managementAction + " needs --to or --into");
+            }
+            if ("--delete-tag".equals(managementAction)
+                    && managementDestination != null) {
+                throw new UsageException("--delete-tag cannot use --to or --into");
+            }
+            manageTag(dbPath, managementAction, managementSource, managementDestination);
+            return;
+        }
+        if (ids.isEmpty() && !hasSearchSelection) {
+            throw new UsageException(
+                "tag needs --ids, search filters, or an explicit --all");
+        }
+        if (!ids.isEmpty() && hasSearchSelection) {
+            throw new UsageException("--ids cannot be combined with search selection");
+        }
+        if (selectAll && (player != null || event != null || eco != null
+                || !requiredTags.isEmpty() || !anyTags.isEmpty()
+                || !excludedTags.isEmpty())) {
+            throw new UsageException("--all cannot be combined with search filters");
+        }
+        if (replacement != null && (!add.isEmpty() || !remove.isEmpty())) {
+            throw new UsageException("--set cannot be combined with --add or --remove");
+        }
+        if (replacement == null && add.isEmpty() && remove.isEmpty()) {
+            throw new UsageException("tag needs --add, --remove, or --set");
+        }
+
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
+            db.setSaveOnClose(false);
+            if (ids.isEmpty()) {
+                Search selection = db.search();
+                if (player != null) selection.player(player);
+                if (event != null) selection.event(event);
+                if (eco != null) selection.eco(eco);
+                if (!requiredTags.isEmpty()) selection.tags(requiredTags);
+                if (!anyTags.isEmpty()) selection.anyTags(anyTags);
+                if (!excludedTags.isEmpty()) selection.withoutTags(excludedTags);
+                ids.addAll(selection.find().stream().map(Game::id).toList());
+            }
+            Database.TagUpdateReport report = replacement != null
+                ? db.setGameTags(ids, replacement)
+                : db.updateGameTags(ids, add, remove);
+            if (report.gamesUpdated() > 0) {
+                db.save();
+            }
+            System.out.printf("%d games updated, %d unchanged.%n",
+                report.gamesUpdated(), report.gamesUnchanged());
+            if (!report.missingGameIds().isEmpty()) {
+                System.out.println("Missing game ids: " + report.missingGameIds());
+            }
+        }
+    }
+
+    private static void manageTag(
+            Path dbPath, String action, String source, String destination)
+            throws Exception {
+        try (Database db = Database.open(dbPath, Database.OpenOptions.locked())) {
+            db.setSaveOnClose(false);
+            Database.TagUpdateReport report = switch (action) {
+                case "--rename" -> db.renameGameTag(source, destination);
+                case "--merge" -> db.mergeGameTag(source, destination);
+                case "--delete-tag" -> db.deleteGameTag(source);
+                default -> throw new AssertionError("Unknown tag management action");
+            };
+            if (report.gamesUpdated() > 0) db.save();
+            System.out.printf("%d games updated, %d unchanged.%n",
+                report.gamesUpdated(), report.gamesUnchanged());
+        }
+    }
+
+    private static List<String> tagList(String value) {
+        List<String> tags = new ArrayList<>();
+        if (value == null || value.isBlank()) return tags;
+        for (String tag : value.split(",")) {
+            if (!tag.isBlank()) tags.add(tag);
+        }
+        return tags;
+    }
+
     private static void export(Path dbPath, String[] args) throws Exception {
         try (Database db = open(dbPath)) {
             List<Game> games = new ArrayList<>();
@@ -387,12 +584,13 @@ public final class Main {
             if (games.isEmpty()) {
                 games.addAll(db.games());
             }
-            String pgn = new PgnWriter().write(games);
             if (out != null) {
-                Files.writeString(out, pgn, StandardCharsets.UTF_8);
+                try (var writer = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
+                    new PgnWriter().write(games, writer);
+                }
                 System.out.println("Wrote " + games.size() + " games to " + out);
             } else {
-                System.out.print(pgn);
+                System.out.print(new PgnWriter().write(games));
             }
         }
     }
