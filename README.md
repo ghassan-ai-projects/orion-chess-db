@@ -1,5 +1,7 @@
 # OrionDB — a chess database with a built-in MCP server
 
+> **Author:** [Ghassan Alhamoud](https://ghassan-alhamoud.com)
+
 OrionDB is a chess database engine for personal collections: a few hundred to
 a few tens of thousands of games, with the search depth of a professional
 database and a **built-in [MCP](https://modelcontextprotocol.io) server** so AI
