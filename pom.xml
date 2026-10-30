@@ -7,12 +7,12 @@
 
     <groupId>com.oriondb</groupId>
     <artifactId>oriondb</artifactId>
-    <version>2.0.0-SNAPSHOT</version>
+    <version>3.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
     <name>OrionDB Chess Database Engine</name>
-    <description>A chess database engine with rich search, opening explorer, and a built-in MCP server</description>
-    <url>https://github.com/oriondb/oriondb</url>
+    <description>Chess database engine: PGN storage with a persistent index, position/pattern/material search,
+        opening explorer, player statistics, game editing, UCI engine analysis, CLI and a built-in MCP server</description>
 
     <licenses>
         <license>
@@ -24,19 +24,20 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.release>17</maven.compiler.release>
+        <maven.compiler.release>21</maven.compiler.release>
         <junit.version>5.10.2</junit.version>
+        <!-- Override (-Doriondb.build.dir=...) to run parallel builds in separate output dirs -->
+        <oriondb.build.dir>${project.basedir}/target</oriondb.build.dir>
     </properties>
 
     <dependencies>
-        <!-- Gson for the MCP JSON-RPC layer -->
+        <!-- JSON for the MCP JSON-RPC layer -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
             <version>2.11.0</version>
         </dependency>
 
-        <!-- JUnit 5 for testing -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -46,6 +47,7 @@
     </dependencies>
 
     <build>
+        <directory>${oriondb.build.dir}</directory>
         <finalName>oriondb</finalName>
         <plugins>
             <plugin>
@@ -57,6 +59,12 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
+                <configuration>
+                    <!-- Slow/perf tests opt in with -Doriondb.slow=true -->
+                    <systemPropertyVariables>
+                        <oriondb.slow>${oriondb.slow}</oriondb.slow>
+                    </systemPropertyVariables>
+                </configuration>
             </plugin>
             <!-- Fat jar: java -jar target/oriondb.jar -->
             <plugin>

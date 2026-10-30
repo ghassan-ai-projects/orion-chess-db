@@ -1,0 +1,159 @@
+# OrionDB v3 architecture
+
+OrionDB is a chess database engine for personal and club collections (up to
+roughly 100k–200k games on a laptop), with search depth comparable to
+commercial databases, UCI engine analysis, a CLI, and a built-in MCP server.
+
+```
+ cli/  (humans)                    mcp/  (AI agents, JSON-RPC over stdio)
+   └───────────────┬──────────────────┘
+                   │
+ query/   Query · QueryParser (text language) · Searcher · PiecePattern
+ stats/   OpeningExplorer · PlayerReport · HeadToHead · DatabaseStats · Duplicates
+ engine/  UciEngine · GameAnnotator (accuracy, ACPL, ?!/?/?? NAGs, best lines)
+                   │
+ db/      Database · Snapshot (immutable view) · Batch (atomic changes)
+          GameRecord (compact per-game summary) · Storage (lock, atomic save)
+          IndexCache (.oidx sidecar) · Positions (index + overlay)
+ index/   PositionIndex (sorted hash → game/ply arrays)
+ analysis/ Material signatures · MotifDetector · PawnFeature   eco/ EcoBook
+                   │
+ pgn/     PgnSplitter (byte offsets) · PgnParser (lenient) · PgnWriter · PgnText
+ game/    Game · GameNode (variations, comments, NAGs, [%cmd]) · Tags · Nag
+ chess/   Position (bitboards, legal moves, Chess960) · San · Uci · Zobrist
+```
+
+Each layer depends only on the layers below it.
+
+## Storage: PGN is the truth, the index is a cache
+
+- The database **is** a `.pgn` file. Any chess program can read it; OrionDB
+  never stores anything that exists only in its own format.
+- `mygames.pgn.oidx` caches every parsed `GameRecord` (header fields, packed
+  mainline, analysis). It is trusted only when the PGN's size and mtime match,
+  otherwise it is rebuilt. Deleting it is always safe.
+- Each game's record knows its byte span in the PGN file. Full games
+  (variations, comments) are read and parsed on demand.
+- **Saves are incremental.** `save()` appends the changed games (their full
+  PGN text, or a deletion) to `mygames.pgn.journal`, then fsyncs.
+  - Frames are length-prefixed and CRC32-checked, and a group only takes
+    effect once its COMMIT frame is written, so each save is atomic.
+  - A torn tail from a crash is ignored, and the next writer truncates it.
+  - The journal header records the PGN size and mtime it applies to. If
+    another program changed the PGN in the meantime, opening fails with an
+    explanation instead of applying edits to the wrong file.
+- **Compaction folds the journal into the PGN.**
+  - It runs on `compact()`, on `close()` by default, and automatically when
+    the journal would exceed max(8 MB, PGN/4).
+  - It writes a temp file, fsyncs, keeps the previous generation as
+    `mygames.pgn.bak` (a hard link when possible), and renames atomically.
+  - Unchanged games are copied byte-for-byte, so formatting you did not touch
+    is preserved. If another program changed the file since it was read, the
+    write is refused.
+  - At 100k games a save costs about 9 ms; compaction about 1 s.
+- `mygames.pgn.lock` holds an OS file lock while a process can write; a second
+  writer fails fast. Read-only opens take no lock.
+- Tool-owned tags: `[OrionId "17"]` (stable id) and `[OrionLabels "a,b"]`. They
+  are written lazily: opening a file never rewrites it.
+- Games that fail to parse are kept verbatim, flagged invalid, excluded from
+  search, and reported (`check`, `db_stats`). Nothing is ever silently dropped.
+
+## In memory
+
+- `GameRecord` per game (~200–400 bytes plus tags): interned header strings,
+  mainline packed at 2 bytes/move, sorted material signatures reached, motif
+  hits, pawn-structure bitmask, labels, lowercase comment text.
+- `PositionIndex`: three parallel arrays sorted by Zobrist hash (14 bytes per
+  position), built in parallel and radix-sorted. Lookups are binary searches.
+  Transposition-aware by construction.
+- Changes after the index was built go to a small overlay that is scanned
+  directly; once it passes ~5% of the database the index is rebuilt.
+- Queries are trees: a `Query` holds its own AND-ed criteria plus `and`, `or`
+  and `not` sub-queries. The text language parses `OR`, `NOT`/`-` and
+  parentheses into that tree. Sort keys are precomputed, and keyset cursors
+  (sort key + id) give stable paging.
+- Move criteria (`move:`, `sequence:`) are matched by meaning (piece, squares,
+  capture, check, promotion) during a single replay that also serves piece
+  patterns. They run only on games that survived the cheaper filters.
+- Reads use immutable `Snapshot`s (lock-free). Writes go through `Batch`, which
+  works on a copy and swaps it in atomically. If the batch body throws,
+  nothing changes.
+
+## Chess core
+
+- Bitboards with classical ray attacks; legal move generation validated by
+  perft (standard suites plus Chess960 positions).
+- Castling is encoded "king takes own rook", which handles standard chess and
+  Chess960 uniformly. FEN reads X-FEN/Shredder castling fields.
+- The en passant square is stored only when a capture is actually possible,
+  so transpositions are equal and hash equal.
+- Zobrist keys come from a fixed seed, so they are deterministic and safe to
+  persist.
+
+## PGN
+
+- `PgnSplitter` splits bytes (not chars), tracking offsets. It recovers from
+  unclosed comments at the next `[Event` line and handles BOMs, `%` escape
+  lines and tags-only games.
+- `PgnParser` is lenient about syntax (glued move numbers, `0-0`, suffix
+  annotations, unclosed tag quotes, `;` comments) but strict about chess. An
+  illegal mainline move rejects the game. An illegal move inside a variation
+  drops only the rest of that variation, with a warning.
+- Per-game encoding detection: UTF-8, falling back to Windows-1252.
+
+## Validation on real data
+
+24,367 real games (the January 2024 Lichess broadcast archive, plus the
+pgnmentor.com Carlsen and Kasparov collections):
+
+- All 24,367 imported with no invalid games, in 3.6 s.
+- 80 duplicates were skipped.
+- The one corrupt record in the Lichess export (two games' tags interleaved)
+  was kept with a warning.
+- Every game survives a write and re-parse unchanged: 2.05 M move nodes,
+  including 9.6k games with `[%clk]`/`[%eval]` comments.
+
+Real names motivated the player identity model. In these collections Carlsen
+appears as `Carlsen,M` 7,809 times and as `Carlsen,Magnus` 9 times. Kasparov
+appears as `Kasparov, Gary`, `Kasparov,G` and `Kasparov, Garry`, while
+`Kasparov,Georgy` is a different player.
+
+## Players
+
+`query.PlayerIndex` groups spellings by surname and first initial, then splits
+groups whose full given names differ in their first three letters
+("Gary"/"Garry" stay together; "Garry"/"Georgy" split). Abbreviated spellings
+join the most frequent full-name identity.
+
+Player filters, reports and head-to-head expand a name query to every
+spelling of the matching identities. An identity that has full-name spellings
+matches only through those, so "kasparov georgy" does not pick up Garry's
+games via `Kasparov,G`. The index is memoized per data version.
+
+## Variations
+
+Positions that occur only inside variations are stored per game and indexed
+with ply -1. `fen:` searches the mainline by default; `scope:all` (or
+`Query.positionInVariations`) includes variations, and such matches are
+reported as "in a variation". The opening explorer counts mainline
+continuations only.
+
+## Change events
+
+`DatabaseListener.committed(Change)` receives the net added, updated and
+deleted ids of each batch, so a game added and deleted in the same batch never
+appears. `saved(version)` fires after each save. Callbacks run after the lock
+is released; a failing listener is logged and isolated.
+
+## Scale (Apple Silicon laptop, synthetic random games, `DatabasePerfTest`)
+
+| games | positions | first open | reopen (cache) | typical query | pattern scan |
+|---:|---:|---:|---:|---:|---:|
+| 20,000 | 1.8 M | 1.4 s | 0.26 s | 4–40 ms | ~100 ms |
+| 100,000 | 8.9 M | 4.9 s | 0.67 s | 7–130 ms | ~115 ms |
+
+Run it yourself:
+
+```bash
+mvn -q test -Dtest=DatabasePerfTest -Doriondb.slow=true -Doriondb.perf.games=50000
+```

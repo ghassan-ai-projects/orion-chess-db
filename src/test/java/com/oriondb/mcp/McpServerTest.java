@@ -1,343 +1,253 @@
 package com.oriondb.mcp;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.oriondb.db.Database;
-import com.oriondb.db.DatabaseTest;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
-import java.io.PrintStream;
-import java.io.StringReader;
-import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class McpServerTest {
+/** Protocol handling and the read-only tools. */
+class McpServerTest extends McpHarness {
 
-    private Database db;
-    private McpServer server;
-    private ByteArrayOutputStream output;
+    static final Set<String> TOOLS = Set.of("db_stats", "search_games", "get_game", "show_position", "opening_explorer",
+        "player_report", "head_to_head", "list_labels", "import_pgn", "add_game", "edit_game", "set_tags", "label_games",
+        "manage_label", "delete_games", "find_duplicates", "remove_duplicates", "export_pgn", "analyze_position",
+        "annotate_game", "batch");
 
-    @BeforeEach
-    void setUp() {
-        db = Database.inMemory();
-        db.importPgn(DatabaseTest.FIXTURE);
-        output = new ByteArrayOutputStream();
-        server = new McpServer(db,
-            new BufferedReader(new StringReader("")),
-            new PrintStream(output, true, StandardCharsets.UTF_8));
-    }
-
-    /** Send one message, return the single-line response (or null). */
-    private JsonObject send(String json) {
-        output.reset();
-        server.handleLine(json);
-        String written = output.toString(StandardCharsets.UTF_8).trim();
-        if (written.isEmpty()) return null;
-        assertFalse(written.contains("\n"), "one response per message");
-        return JsonParser.parseString(written).getAsJsonObject();
-    }
-
-    private JsonObject callTool(String name, String argsJson) {
-        JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
-            + "\"params\":{\"name\":\"" + name + "\",\"arguments\":" + argsJson + "}}");
-        assertNotNull(response);
-        assertTrue(response.has("result"), response::toString);
-        return response.getAsJsonObject("result");
-    }
-
-    private static JsonObject payload(JsonObject toolResult) {
-        assertFalse(toolResult.has("isError") && toolResult.get("isError").getAsBoolean(),
-            toolResult::toString);
-        return toolResult.getAsJsonObject("structuredContent");
-    }
-
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------ protocol
 
     @Test
     void initializeHandshake() {
-        JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
-            + "\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},"
-            + "\"clientInfo\":{\"name\":\"test\",\"version\":\"0\"}}}");
-        assertNotNull(response);
-        JsonObject result = response.getAsJsonObject("result");
-        assertEquals("2025-06-18", result.get("protocolVersion").getAsString());
-        assertEquals("oriondb", result.getAsJsonObject("serverInfo").get("name").getAsString());
-        assertTrue(result.getAsJsonObject("capabilities").has("tools"));
-
-        // The initialized notification produces no response.
-        assertNull(send("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"));
+        List<JsonElement> out = session(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1999-01-01\"}}");
+        assertEquals(3, out.size(), "the notification gets no response: " + out);
+        JsonObject init = out.get(0).getAsJsonObject().getAsJsonObject("result");
+        assertEquals("2025-03-26", init.get("protocolVersion").getAsString());
+        assertEquals("oriondb", init.getAsJsonObject("serverInfo").get("name").getAsString());
+        assertEquals("3.0.0", init.getAsJsonObject("serverInfo").get("version").getAsString());
+        assertTrue(init.getAsJsonObject("capabilities").has("tools"));
+        String instructions = init.get("instructions").getAsString();
+        assertTrue(instructions.contains("stable") && instructions.contains("saved"), instructions);
+        assertEquals(2, out.get(1).getAsJsonObject().get("id").getAsInt());
+        assertTrue(out.get(1).getAsJsonObject().getAsJsonObject("result").isEmpty());
+        assertEquals("2025-06-18", out.get(2).getAsJsonObject().getAsJsonObject("result").get("protocolVersion").getAsString());
     }
 
     @Test
-    void olderProtocolVersionEchoed() {
-        JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
-            + "\"params\":{\"protocolVersion\":\"2024-11-05\"}}");
-        assertEquals("2024-11-05",
-            response.getAsJsonObject("result").get("protocolVersion").getAsString());
-    }
-
-    @Test
-    void toolsList() {
-        JsonObject response = send("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
-        JsonArray tools = response.getAsJsonObject("result").getAsJsonArray("tools");
-        assertEquals(17, tools.size());
-        boolean foundSearch = false;
-        boolean foundGameTags = false;
-        boolean foundBatch = false;
-        for (var tool : tools) {
-            JsonObject t = tool.getAsJsonObject();
-            assertTrue(t.has("name"));
-            assertTrue(t.has("description"));
-            assertEquals("object",
-                t.getAsJsonObject("inputSchema").get("type").getAsString());
-            if (t.get("name").getAsString().equals("search_games")) foundSearch = true;
-            if (t.get("name").getAsString().equals("update_game_tags")) foundGameTags = true;
-            if (t.get("name").getAsString().equals("batch_mutate")) foundBatch = true;
+    void toolsListHasSchemas() {
+        JsonArray tools = request("tools/list", new JsonObject()).getAsJsonObject("result").getAsJsonArray("tools");
+        Set<String> names = new HashSet<>();
+        for (JsonElement e : tools) {
+            JsonObject t = e.getAsJsonObject();
+            String name = t.get("name").getAsString();
+            names.add(name);
+            assertFalse(t.get("description").getAsString().isBlank(), name);
+            JsonObject schema = t.getAsJsonObject("inputSchema");
+            assertEquals("object", schema.get("type").getAsString(), name);
+            assertTrue(schema.has("properties"), name);
+            for (var p : schema.getAsJsonObject("properties").entrySet()) {
+                assertTrue(p.getValue().getAsJsonObject().has("description"), name + "." + p.getKey() + " lacks a description");
+            }
         }
-        assertTrue(foundSearch);
-        assertTrue(foundGameTags);
-        assertTrue(foundBatch);
+        assertEquals(TOOLS, names);
     }
 
     @Test
-    void searchGamesTool() {
-        JsonObject payload = payload(callTool("search_games",
-            "{\"player\":\"morphy\"}"));
-        assertEquals(1, payload.get("total_count").getAsInt());
-        JsonObject game = payload.getAsJsonArray("games").get(0).getAsJsonObject();
-        assertEquals("Morphy, Paul", game.get("white").getAsString());
-        assertEquals("C41", game.get("eco").getAsString());
-    }
+    void booleanQueriesMovesAndCursors() {
+        JsonObject or = structured(ok("search_games", Json.write(Json.obj("query", "player:morphy OR player:fischer"))));
+        assertEquals(2, or.get("total").getAsInt());
+        JsonObject not = structured(ok("search_games", Json.write(Json.obj("query", "-player:morphy -player:fischer", "limit", 100))));
+        assertEquals(structured(ok("db_stats", "{}")).get("games").getAsInt() - 2, not.get("total").getAsInt());
+        JsonObject moves = structured(ok("search_games", Json.write(Json.obj("moves", List.of("Rd8#"), "move_by", "white"))));
+        assertEquals(1, moves.get("total").getAsInt());
+        assertTrue(moves.getAsJsonArray("games").get(0).getAsJsonObject().get("match_move").getAsString().contains("Rd8#"));
 
-    @Test
-    void searchWithMotifAndLimit() {
-        JsonObject payload = payload(callTool("search_games",
-            "{\"motif\":\"checkmate\",\"limit\":1}"));
-        assertEquals(2, payload.get("total_count").getAsInt());
-        assertEquals(1, payload.get("returned").getAsInt());
-    }
-
-    @Test
-    void getGameTool() {
-        int id = db.search().player("Morphy").find().get(0).id();
-        JsonObject payload = payload(callTool("get_game", "{\"game_id\":" + id + "}"));
-        assertEquals("Morphy, Paul", payload.get("white").getAsString());
-        assertTrue(payload.get("pgn").getAsString().contains("Rd8#"));
-        assertEquals(33, payload.getAsJsonArray("mainline").size());
-        assertTrue(payload.getAsJsonArray("tactical_moments").size() > 0);
-        assertTrue(payload.has("final_fen"));
-    }
-
-    @Test
-    void openingExplorerTool() {
-        JsonObject payload = payload(callTool("opening_explorer",
-            "{\"moves\":\"1. e4\"}"));
-        assertEquals(4, payload.get("total_games").getAsInt());
-        JsonArray moves = payload.getAsJsonArray("moves");
-        assertEquals("e5", moves.get(0).getAsJsonObject().get("san").getAsString());
-        assertEquals(3, moves.get(0).getAsJsonObject().get("games").getAsInt());
-        assertTrue(moves.get(0).getAsJsonObject().getAsJsonArray("sample_games").size() > 0);
-    }
-
-    @Test
-    void positionSearchTool() {
-        JsonObject payload = payload(callTool("position_search",
-            "{\"fen\":\"rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 0 6\"}"));
-        assertEquals(1, payload.get("total_count").getAsInt());
-        JsonObject game = payload.getAsJsonArray("games").get(0).getAsJsonObject();
-        assertEquals("Kasparov, Garry", game.get("white").getAsString());
-        assertEquals(10, game.get("reached_at_ply").getAsInt());
-    }
-
-    @Test
-    void playerAndHeadToHeadTools() {
-        JsonObject report = payload(callTool("player_report", "{\"player\":\"Rossi\"}"));
-        assertEquals("Rossi, Mario", report.get("player").getAsString());
-        assertEquals(2, report.get("total_games").getAsInt());
-
-        JsonObject h2h = payload(callTool("head_to_head",
-            "{\"player_a\":\"Rossi\",\"player_b\":\"Bianchi\"}"));
-        assertEquals(1, h2h.getAsJsonObject("overall_for_a").get("games").getAsInt());
-    }
-
-    @Test
-    void mutationTools() {
-        JsonObject added = payload(callTool("add_game",
-            "{\"pgn_text\":\"[White \\\"New, Player\\\"]\\n[Black \\\"Other, One\\\"]\\n"
-            + "[Result \\\"1-0\\\"]\\n\\n1. d4 d5 2. c4 e6 1-0\"}"));
-        int newId = added.get("game_id").getAsInt();
-        assertEquals(7, added.get("game_count").getAsInt());
-
-        JsonObject tagged = payload(callTool("set_tag",
-            "{\"game_id\":" + newId + ",\"key\":\"Event\",\"value\":\"Test Event\"}"));
-        assertEquals("Test Event", tagged.get("value").getAsString());
-        assertEquals("Test Event", db.game(newId).event());
-
-        JsonObject deleted = payload(callTool("delete_game", "{\"game_id\":" + newId + "}"));
-        assertEquals(6, deleted.get("game_count").getAsInt());
-        assertNull(db.game(newId));
-    }
-
-    @Test
-    void bulkGameTagsAndTagSearch() {
-        int morphy = db.search().player("Morphy").find().get(0).id();
-        int kasparov = db.search().player("Kasparov").find().get(0).id();
-
-        JsonObject updated = payload(callTool("update_game_tags",
-            "{\"game_ids\":[" + morphy + "," + kasparov
-                + "],\"add\":[\"Tactics\",\"Reviewed\"]}"));
-        assertEquals(2, updated.get("games_updated").getAsInt());
-        assertEquals(2, updated.getAsJsonArray("games").size());
-
-        payload(callTool("update_game_tags",
-            "{\"game_ids\":[" + morphy + "],\"add\":[\"Study\"]}"));
-
-        JsonObject all = payload(callTool("search_games",
-            "{\"tags\":[\"tactics\",\"study\"],\"tag_mode\":\"all\"}"));
-        assertEquals(1, all.get("total_count").getAsInt());
-        JsonObject game = all.getAsJsonArray("games").get(0).getAsJsonObject();
-        assertEquals(morphy, game.get("game_id").getAsInt());
-        assertTrue(game.getAsJsonArray("game_tags").toString().contains("study"));
-
-        JsonObject excluded = payload(callTool("search_games",
-            "{\"tags\":[\"tactics\"],\"exclude_tags\":[\"study\"]}"));
-        assertEquals(1, excluded.get("total_count").getAsInt());
-        assertEquals(kasparov, excluded.getAsJsonArray("games")
-            .get(0).getAsJsonObject().get("game_id").getAsInt());
-    }
-
-    @Test
-    void batchMutationsCommitTogetherOrRollBackTogether() {
-        int morphy = db.search().player("Morphy").find().get(0).id();
-        int kasparov = db.search().player("Kasparov").find().get(0).id();
-
-        JsonObject committed = payload(callTool("batch_mutate", """
-            {"operations":[
-              {"action":"set_tag","game_id":%d,"key":"Annotator","value":"Orion"},
-              {"action":"update_game_tags","game_ids":[%d],"add":["study"]}
-            ]}
-            """.formatted(morphy, kasparov)));
-        assertEquals(2, committed.get("operations_applied").getAsInt());
-        assertEquals("Orion", db.game(morphy).tag("Annotator"));
-        assertTrue(db.game(kasparov).hasGameTag("study"));
-
-        JsonObject failed = callTool("batch_mutate", """
-            {"operations":[
-              {"action":"set_tag","game_id":%d,"key":"Event","value":"Must Roll Back"},
-              {"action":"delete_game","game_id":99999}
-            ]}
-            """.formatted(morphy));
-        assertTrue(failed.get("isError").getAsBoolean());
-        assertNotEquals("Must Roll Back", db.game(morphy).event());
-    }
-
-    @Test
-    void tagsCanBeManagedAndAppliedBySearch() {
-        int morphy = db.search().player("Morphy").find().get(0).id();
-        int kasparov = db.search().player("Kasparov").find().get(0).id();
-        payload(callTool("update_game_tags",
-            "{\"game_ids\":[" + morphy + "],\"add\":[\"inbox\"]}"));
-        payload(callTool("update_game_tags",
-            "{\"game_ids\":[" + kasparov + "],\"add\":[\"reviewed\"]}"));
-
-        JsonObject selected = payload(callTool("tag_games_by_search",
-            "{\"player\":\"Morphy\",\"add\":[\"study\"]}"));
-        assertEquals(1, selected.get("games_matched").getAsInt());
-        assertTrue(db.game(morphy).hasGameTag("study"));
-        assertFalse(db.game(kasparov).hasGameTag("study"));
-
-        JsonObject unsafe = callTool("tag_games_by_search",
-            "{\"add\":[\"accidental\"]}");
-        assertTrue(unsafe.get("isError").getAsBoolean());
-        assertEquals(0, db.search().tag("accidental").count());
-
-        JsonObject renamed = payload(callTool("manage_game_tag",
-            "{\"action\":\"rename\",\"source\":\"inbox\",\"destination\":\"queue\"}"));
-        assertEquals(1, renamed.get("games_updated").getAsInt());
-        assertTrue(db.game(morphy).hasGameTag("queue"));
-
-        JsonObject conflict = callTool("manage_game_tag",
-            "{\"action\":\"rename\",\"source\":\"queue\",\"destination\":\"reviewed\"}");
-        assertTrue(conflict.get("isError").getAsBoolean());
-        assertTrue(db.game(morphy).hasGameTag("queue"));
-
-        JsonObject merged = payload(callTool("manage_game_tag",
-            "{\"action\":\"merge\",\"source\":\"queue\",\"destination\":\"reviewed\"}"));
-        assertEquals(1, merged.get("games_updated").getAsInt());
-        assertTrue(db.game(morphy).hasGameTag("reviewed"));
-    }
-
-    @Test
-    void importAndExportTools() {
-        JsonObject imported = payload(callTool("import_pgn",
-            "{\"pgn_text\":\"[White \\\"A\\\"]\\n[Black \\\"B\\\"]\\n[Result \\\"*\\\"]\\n\\n1. Nf3 *\"}"));
-        assertEquals(1, imported.get("games_added").getAsInt());
-
-        JsonObject exported = payload(callTool("export_pgn", "{}"));
-        assertEquals(7, exported.get("games_exported").getAsInt());
-        assertTrue(exported.get("pgn").getAsString().contains("Morphy"));
-    }
-
-    @Test
-    void strictImportErrorsAreStructured() {
-        JsonObject imported = payload(callTool("import_pgn",
-            "{\"pgn_text\":\"[White \\\"Bad\\\"]\\n[Black \\\"Move\\\"]\\n"
-                + "[Result \\\"*\\\"]\\n\\n1. e4 e5 2. Nf6 *\"}"));
-        assertEquals(0, imported.get("games_added").getAsInt());
-        assertEquals(1, imported.get("games_rejected").getAsInt());
-        JsonObject error = imported.getAsJsonArray("errors").get(0).getAsJsonObject();
-        assertEquals(1, error.get("game_number").getAsInt());
-        assertEquals("ILLEGAL_MAINLINE_MOVE", error.get("code").getAsString());
-
-        JsonObject add = callTool("add_game",
-            "{\"pgn_text\":\"[Result \\\"*\\\"]\\n\\n1. e4 e5 2. Nf6 *\"}");
-        assertTrue(add.get("isError").getAsBoolean());
-        assertTrue(add.getAsJsonArray("content").get(0).getAsJsonObject()
-            .get("text").getAsString().contains("rejected"));
-    }
-
-    @Test
-    void dbStatsAndDuplicatesTools() {
-        JsonObject stats = payload(callTool("db_stats", "{}"));
-        assertEquals(6, stats.get("game_count").getAsInt());
-        assertTrue(stats.get("unique_players").getAsInt() >= 10);
-
-        JsonObject dupes = payload(callTool("find_duplicates", "{}"));
-        assertEquals(0, dupes.get("group_count").getAsInt());
-    }
-
-    @Test
-    void toolErrors() {
-        JsonObject unknownTool = callTool("no_such_tool", "{}");
-        assertTrue(unknownTool.get("isError").getAsBoolean());
-
-        JsonObject badGame = callTool("get_game", "{\"game_id\":99999}");
-        assertTrue(badGame.get("isError").getAsBoolean());
-        assertTrue(badGame.getAsJsonArray("content").get(0).getAsJsonObject()
-            .get("text").getAsString().contains("99999"));
-
-        JsonObject badFen = callTool("position_search", "{\"fen\":\"not a fen\"}");
-        assertTrue(badFen.get("isError").getAsBoolean());
+        JsonObject page1 = structured(ok("search_games", Json.write(Json.obj("sort", "date", "limit", 2))));
+        String cursor = page1.get("next_cursor").getAsString();
+        JsonObject page2 = structured(ok("search_games", Json.write(Json.obj("sort", "date", "limit", 2, "after", cursor))));
+        assertNotEquals(page1.getAsJsonArray("games").get(0), page2.getAsJsonArray("games").get(0));
+        assertTrue(isError(call("search_games", Json.write(Json.obj("after", "garbage!")))));
     }
 
     @Test
     void protocolErrors() {
-        JsonObject parseError = send("this is not json");
-        assertEquals(-32700, parseError.getAsJsonObject("error").get("code").getAsInt());
+        List<JsonElement> out = session(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"no/such/method\"}",
+            "{not json",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"arguments\":{}}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"get_game\",\"arguments\":[1]}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"ping\"}");
+        assertEquals(6, out.size());
+        assertEquals(-32601, code(out.get(0)));
+        assertEquals(-32700, code(out.get(1)));
+        assertTrue(out.get(1).getAsJsonObject().get("id").isJsonNull());
+        assertEquals(-32602, code(out.get(2)));
+        assertEquals(-32602, code(out.get(3)));
+        assertEquals(-32602, code(out.get(4)));
+        assertTrue(out.get(5).getAsJsonObject().has("result"), "the loop survives errors");
+    }
 
-        JsonObject unknownMethod = send(
-            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"bogus/method\"}");
-        assertEquals(-32601, unknownMethod.getAsJsonObject("error").get("code").getAsInt());
+    private static int code(JsonElement e) {
+        return e.getAsJsonObject().getAsJsonObject("error").get("code").getAsInt();
+    }
 
-        assertNull(send("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/whatever\"}"),
-            "unknown notifications are ignored silently");
+    @Test
+    void badToolArgumentsAreToolErrors() {
+        assertTrue(fails("search_games", "{\"plyr\": \"carlsen\"}").contains("unknown argument 'plyr'"));
+        assertTrue(fails("get_game", "{}").contains("missing required argument 'id'"));
+        assertTrue(fails("get_game", "{\"id\": 9999}").contains("no game with id 9999"));
+        assertTrue(fails("get_game", "{\"id\": \"abc\"}").contains("integer"));
+        assertTrue(fails("search_games", "{\"query\": \"frobnicate:3\"}").contains("unknown query key"));
+        assertTrue(fails("search_games", "{\"motifs\": [\"teleport\"]}").contains("unknown motif"));
+        assertTrue(fails("show_position", "{\"moves\": \"e4 e5 Ke3\"}").contains("Ke3"));
+        assertTrue(fails("show_position", "{\"fen\": \"not a fen\"}").contains("invalid FEN"));
+        assertTrue(fails("search_games", "{\"limit\": 501}").contains("between 1 and 500"));
+    }
 
-        JsonObject ping = send("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"ping\"}");
-        assertTrue(ping.has("result"));
+    // ------------------------------------------------------------ read tools
+
+    @Test
+    void dbStats() {
+        JsonObject res = ok("db_stats", "{}");
+        assertTrue(text(res).contains("Games: 6"), text(res));
+        assertTrue(text(res).contains(file.toAbsolutePath().toString()));
+        assertEquals(6, structured(res).get("games").getAsInt());
+    }
+
+    @Test
+    void searchStructured() {
+        JsonObject s = structured(ok("search_games", "{\"player\": \"carlsen\", \"outcome\": \"win\", \"sort\": \"date\", \"descending\": true}"));
+        assertEquals(2, s.get("total").getAsInt());
+        JsonArray games = s.getAsJsonArray("games");
+        assertEquals("Roe, Jane", games.get(0).getAsJsonObject().get("white").getAsString(), "newest first");
+
+        s = structured(ok("search_games", "{\"min_elo\": 2800, \"elo_mode\": \"either\", \"eco\": \"B90-B99\"}"));
+        assertEquals(1, s.get("total").getAsInt());
+
+        s = structured(ok("search_games", "{\"motifs\": [\"queen_sacrifice\"], \"result\": \"1-0\"}"));
+        assertTrue(s.get("total").getAsInt() >= 1);
+
+        s = structured(ok("search_games", "{\"line\": \"1. e4 e5\", \"limit\": 1}"));
+        assertTrue(s.get("total").getAsInt() >= 3);
+        assertEquals(1, s.getAsJsonArray("games").size());
+    }
+
+    @Test
+    void searchByQueryAndCombined() {
+        JsonObject res = ok("search_games", "{\"query\": \"player:carlsen as:black\"}");
+        assertEquals(1, structured(res).get("total").getAsInt());
+        assertTrue(text(res).contains("Roe, Jane"), text(res));
+
+        // query + structured fields are AND-combined
+        JsonObject s = structured(ok("search_games", "{\"query\": \"year:1800..1900\", \"white\": \"morphy\"}"));
+        assertEquals(1, s.get("total").getAsInt());
+        assertEquals(0, structured(ok("search_games", "{\"query\": \"year:1800..1900\", \"white\": \"carlsen\"}")).get("total").getAsInt());
+    }
+
+    @Test
+    void searchByPositionReportsMatchPly() {
+        // Najdorf position after 5... a6, reached only in the Carlsen game
+        JsonObject s = structured(ok("search_games",
+            "{\"fen\": \"rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 0 6\"}"));
+        assertEquals(1, s.get("total").getAsInt());
+        JsonObject row = s.getAsJsonArray("games").get(0).getAsJsonObject();
+        assertEquals(10, row.get("match_ply").getAsInt());
+        assertEquals("5... a6", row.get("match_move").getAsString());
+    }
+
+    @Test
+    void getGame() {
+        int id = idOf("white:morphy");
+        JsonObject res = ok("get_game", "{\"id\": " + id + ", \"ply\": 2}");
+        String t = text(res);
+        assertTrue(t.contains("[White \"Morphy, Paul\"]"), t);
+        assertTrue(t.contains("17. Rd8#"), t);
+        assertTrue(t.contains("queen_sacrifice"), t);
+        assertTrue(t.contains("PGN:"), t);
+        JsonObject s = structured(res);
+        assertEquals("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            s.getAsJsonObject("position").get("fen").getAsString());
+        assertTrue(s.get("final_fen").getAsString().startsWith("1n1Rkb1r"));
+        assertTrue(s.getAsJsonArray("flags").toString().contains("comments"));
+    }
+
+    @Test
+    void showPosition() {
+        JsonObject res = ok("show_position", "{\"moves\": \"1. e4 c5\"}");
+        JsonObject s = structured(res);
+        assertEquals("white", s.get("side_to_move").getAsString());
+        assertEquals(30, s.getAsJsonArray("legal_moves").size());
+        assertTrue(s.getAsJsonObject("opening").get("name").getAsString().contains("Sicilian"));
+        assertEquals(1, s.get("games_in_db").getAsInt());
+        assertTrue(text(res).contains("r n b q k b n r"), text(res));
+
+        s = structured(ok("show_position", "{\"fen\": \"6k1/5ppp/8/8/8/8/5PPP/3R2K1 b - - 0 1\", \"moves\": \"Kf8\"}"));
+        assertEquals("white", s.get("side_to_move").getAsString());
+
+        int id = idOf("white:morphy");
+        s = structured(ok("show_position", "{\"game_id\": " + id + "}"));
+        assertEquals("checkmate", s.get("status").getAsString());
+        assertEquals(0, s.getAsJsonArray("legal_moves").size());
+    }
+
+    @Test
+    void openingExplorer() {
+        JsonObject s = structured(ok("opening_explorer", "{}"));
+        assertEquals(6, s.get("games").getAsInt());
+        JsonObject first = s.getAsJsonArray("moves").get(0).getAsJsonObject();
+        assertEquals("e4", first.get("san").getAsString());
+        assertEquals(4, first.get("games").getAsInt());
+
+        s = structured(ok("opening_explorer", "{\"moves\": \"e4\", \"filter\": \"player:carlsen\"}"));
+        assertEquals(1, s.get("games").getAsInt());
+        assertEquals("c5", s.getAsJsonArray("moves").get(0).getAsJsonObject().get("san").getAsString());
+    }
+
+    @Test
+    void playerReportAndHeadToHead() {
+        JsonObject res = ok("player_report", "{\"name\": \"magnus carlsen\"}");
+        assertEquals(2, structured(res).getAsJsonObject("total").get("wins").getAsInt());
+        assertTrue(text(res).contains("Openings as White"), text(res));
+
+        res = ok("head_to_head", "{\"player_a\": \"carlsen\", \"player_b\": \"doe\"}");
+        assertEquals(1, structured(res).getAsJsonObject("total").get("games").getAsInt());
+        assertEquals(1, structured(res).getAsJsonArray("game_ids").size());
+        assertTrue(text(ok("player_report", "{\"name\": \"nobody here\"}")).contains("No games"));
+    }
+
+    @Test
+    void exportPgn() throws Exception {
+        String t = text(ok("export_pgn", "{\"query\": \"player:carlsen\", \"comments\": false}"));
+        assertEquals(2, t.split("\\[Event ").length - 1, t);
+        assertTrue(fails("export_pgn", "{\"path\": \"" + file.toAbsolutePath() + "\"}").contains("refusing"));
+        assertTrue(fails("export_pgn", "{\"path\": \"games.pgn\"}").contains("refusing"));
+        JsonObject res = ok("export_pgn", "{\"ids\": [1, 2], \"path\": \"out/two.pgn\"}");
+        String written = java.nio.file.Files.readString(dir.resolve("out/two.pgn"));
+        assertEquals(2, written.split("\\[Event ").length - 1);
+        assertTrue(text(res).contains("Wrote 2 games"));
+        assertTrue(fails("export_pgn", "{\"ids\": [1], \"path\": \"out/two.pgn\"}").contains("overwrite"));
+    }
+
+    @Test
+    void findDuplicates() {
+        int id = idOf("white:anderssen");
+        String pgn = structured(ok("get_game", "{\"id\": " + id + "}")).get("pgn").getAsString();
+        ok("import_pgn", Json.write(Json.obj("pgn", pgn, "skip_duplicates", false)));
+        JsonObject s = structured(ok("find_duplicates", "{}"));
+        assertEquals(1, s.get("groups").getAsInt());
+        JsonObject dry = structured(ok("remove_duplicates", "{}"));
+        assertTrue(dry.get("dry_run").getAsBoolean());
+        assertEquals(7, db.size(), "dry run changes nothing");
+        ok("remove_duplicates", "{\"dry_run\": false}");
+        assertEquals(6, db.size());
     }
 }

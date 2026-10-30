@@ -1,359 +1,435 @@
 package com.oriondb.db;
 
-import com.oriondb.analysis.Motifs;
-import com.oriondb.search.Duplicates;
-import com.oriondb.search.OpeningExplorer;
-import com.oriondb.search.PlayerStats;
-import com.oriondb.search.Search;
-import com.oriondb.model.Game;
-import org.junit.jupiter.api.BeforeAll;
+import com.oriondb.analysis.Material;
+import com.oriondb.analysis.Motif;
+import com.oriondb.game.Game;
+import com.oriondb.game.GameNode;
+import com.oriondb.query.Query;
+import com.oriondb.query.QueryParser;
+import com.oriondb.query.SearchResult;
+import com.oriondb.query.Searcher;
+import com.oriondb.stats.DatabaseStats;
+import com.oriondb.stats.Duplicates;
+import com.oriondb.stats.HeadToHead;
+import com.oriondb.stats.OpeningExplorer;
+import com.oriondb.stats.PlayerReport;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-public class DatabaseTest {
-
-    /** The Opera Game, a Najdorf, an Italian, a scholar's mate, a Lucena
-     *  bridge (FEN game), and an underpromotion fork (FEN game). */
-    public static final String FIXTURE = """
-        [Event "Paris Opera"]
-        [Site "Paris FRA"]
-        [Date "1858.11.02"]
-        [White "Morphy, Paul"]
-        [Black "Duke Karl / Count Isouard"]
+class DatabaseTest {
+    static final String GAMES = """
+        [Event "Club"]
+        [Site "Here"]
+        [Date "2020.03.01"]
+        [Round "1"]
+        [White "Carlsen, Magnus"]
+        [Black "Doe, John"]
         [Result "1-0"]
+        [WhiteElo "2850"]
+        [BlackElo "2100"]
 
-        1. e4 e5 2. Nf3 d6 3. d4 Bg4 4. dxe5 Bxf3 5. Qxf3 dxe5 6. Bc4 Nf6 7. Qb3 Qe7
-        8. Nc3 c6 9. Bg5 b5 10. Nxb5 cxb5 11. Bxb5+ Nbd7 12. O-O-O Rd8 13. Rxd7 Rxd7
-        14. Rd1 Qe6 15. Bxd7+ Nxd7 {The famous finish begins.} 16. Qb8+ {A brilliant
-        queen sacrifice!} Nxb8 17. Rd8# 1-0
+        1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 {Najdorf} 6. Be3 e5 1-0
 
-        [Event "Superbowl Chess"]
-        [Site "Linares"]
-        [Date "1999.02.24"]
-        [White "Kasparov, Garry"]
-        [Black "Topalov, Veselin"]
-        [Result "1/2-1/2"]
-        [WhiteElo "2812"]
-        [BlackElo "2700"]
-
-        1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Be3 e5 7. Nb3 Be6
-        8. f3 Be7 9. Qd2 O-O 1/2-1/2
-
-        [Event "Club Match"]
-        [Site "Rome"]
-        [Date "2021.07.15"]
-        [White "Rossi, Mario"]
-        [Black "Bianchi, Luigi"]
+        [Event "Club"]
+        [Date "2021.05.01"]
+        [White "Doe, John"]
+        [Black "Carlsen, Magnus"]
         [Result "0-1"]
-        [WhiteElo "2200"]
-        [BlackElo "2250"]
+        [WhiteElo "2150"]
+        [BlackElo "2860"]
 
-        1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 Nf6 5. d3 d6 6. O-O O-O 0-1
+        1. Nf3 Nf6 2. d4 d6 3. e4 c5 (3... e5) 4. Nc3 cxd4 5. Nxd4 a6 0-1
 
-        [Event "Club Match"]
-        [Site "Rome"]
-        [Date "2021.07.16"]
-        [White "Rossi, Mario"]
-        [Black "Verdi, Giuseppe"]
+        [Event "Legal"]
+        [White "Legal"]
+        [Black "Saint Brie"]
         [Result "1-0"]
-        [WhiteElo "2200"]
-        [BlackElo "1900"]
+        [Date "1750.??.??"]
 
-        1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7# 1-0
+        1. e4 e5 2. Nf3 d6 3. Bc4 Bg4 4. Nc3 g6 5. Nxe5 Bxd1 6. Bxf7+ Ke7 7. Nd5# 1-0
 
-        [Event "Endgame Study"]
-        [Site "?"]
-        [Date "2020.01.01"]
-        [White "Lucena, Practice"]
-        [Black "Defender, Rook"]
-        [Result "1-0"]
+        [Event "Broken"]
+        [White "X"]
+        [Black "Y"]
+        [Result "*"]
+
+        1. e4 e5 2. Ke3 *
+
+        [Event "Endgame"]
+        [White "A"]
+        [Black "B"]
+        [Result "1/2-1/2"]
         [SetUp "1"]
-        [FEN "1K1k4/1P6/8/8/8/8/r7/2R5 w - - 0 1"]
+        [FEN "8/8/4k3/8/3PK3/8/8/7r w - - 0 60"]
 
-        1. Rd1+ Ke7 2. Rd4 Ra1 3. Kc7 Rc1+ 4. Kb6 Rb1+ 5. Kc6 Rc1+ 6. Kb5 Rb1+
-        7. Rb4 Rxb4+ 8. Kxb4 Ke6 9. b8=Q 1-0
-
-        [Event "Promotion Trick"]
-        [Site "?"]
-        [Date "2020.06.01"]
-        [White "Under, Promo"]
-        [Black "Forked, Victim"]
-        [Result "1-0"]
-        [SetUp "1"]
-        [FEN "8/3q1P1k/8/8/8/8/8/K7 w - - 0 1"]
-
-        1. f8=N+ Kh8 2. Nxd7 1-0
+        60. d5+ Kd6 61. Kd4 Rh4+ 1/2-1/2
         """;
 
-    static Database db;
-
-    @BeforeAll
-    static void load() {
-        db = Database.inMemory();
-        Database.ImportReport report = db.importPgn(FIXTURE);
-        assertEquals(6, report.gamesAdded(), () -> report.warnings().toString());
-        assertEquals(0, report.duplicatesSkipped());
-    }
-
-    // ------------------------------------------------------------------
-    // Import and classification
-    // ------------------------------------------------------------------
-
-    @Test
-    void ecoAutoClassification() {
-        // The Opera Game has no ECO tag; the book supplies Philidor Defense.
-        Game opera = db.search().player("Morphy").find().get(0);
-        assertEquals("C41", opera.tag("ECO"));
-        assertNotNull(opera.tag("Opening"));
-        assertTrue(opera.tag("Opening").contains("Philidor"), opera.tag("Opening"));
-
-        // The Najdorf is B90.
-        Game najdorf = db.search().player("Kasparov").find().get(0);
-        assertEquals("B90", najdorf.tag("ECO"));
+    private static Path write(Path dir, String name, String text) throws Exception {
+        Path p = dir.resolve(name);
+        Files.writeString(p, text, StandardCharsets.UTF_8);
+        return p;
     }
 
     @Test
-    void duplicateImportSkipped() {
-        Database fresh = Database.inMemory();
-        fresh.importPgn(FIXTURE);
-        Database.ImportReport again = fresh.importPgn(FIXTURE);
-        assertEquals(0, again.gamesAdded());
-        assertEquals(6, again.duplicatesSkipped());
-    }
-
-    // ------------------------------------------------------------------
-    // Search
-    // ------------------------------------------------------------------
-
-    @Test
-    void playerSearchIsSubstringCaseInsensitive() {
-        assertEquals(1, db.search().player("morphy").count());
-        assertEquals(1, db.search().white("KASPAROV").count());
-        assertEquals(2, db.search().white("Rossi").count());
-        assertEquals(0, db.search().black("Rossi").count());
-    }
-
-    @Test
-    void resultAndDateFilters() {
-        assertEquals(4, db.search().result("white").count());
-        assertEquals(1, db.search().result("draw").count());
-        assertEquals(5, db.search().result("decisive").count());
-        assertEquals(2, db.search().dateFrom("2021").count());
-        assertEquals(1, db.search().dateFrom("1850").dateTo("1900").count());
+    void openParsesKeepsInvalidAndAssignsIds(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        try (Database db = Database.open(file)) {
+            assertEquals(5, db.size());
+            assertEquals(1, db.invalidGames().size());
+            assertTrue(db.invalidGames().get(0).error().contains("Ke3"));
+            Snapshot s = db.snapshot();
+            assertEquals(List.of(1, 2, 3, 4, 5), s.records().stream().map(GameRecord::id).toList());
+            assertEquals("B90", s.get(1).eco());
+            assertTrue(s.get(1).opening().startsWith("Sicilian Defense: Najdorf"), s.get(1).opening());
+            assertEquals("B90", s.get(2).eco(), "transposition-aware ECO");
+            assertTrue(s.get(3).hasMotif(Motif.CHECKMATE));
+            assertTrue(s.get(5).has(GameRecord.SETUP));
+            assertFalse(db.isDirty());
+        }
+        assertTrue(Files.exists(dir.resolve("db.pgn.oidx")), "cache written");
+        assertEquals(GAMES, Files.readString(file), "opening never rewrites the PGN");
     }
 
     @Test
-    void ecoFilters() {
-        assertEquals(1, db.search().eco("B90").count());
-        assertEquals(1, db.search().eco("B90-B99").count());
-        assertEquals(1, db.search().eco("C4").count());   // prefix: C41 Opera game
-        assertEquals(0, db.search().eco("E").count());
-    }
+    void cacheReopenAndSaveRoundTrip(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        try (Database db = Database.open(file)) {
+            db.update(b -> b.updateLabels(1, List.of("Prep", "sicilian"), List.of()));
+            db.setTag(2, "Annotator", "Me");
+            db.save();
+        }
+        String saved = Files.readString(file);
+        assertTrue(saved.contains("[OrionId \"1\"]"));
+        assertTrue(saved.contains("[OrionLabels \"prep,sicilian\"]"));
+        assertTrue(saved.contains("[Annotator \"Me\"]"));
+        assertTrue(saved.contains("1. e4 e5 2. Ke3 *"), "invalid game preserved verbatim");
+        assertTrue(Files.exists(dir.resolve("db.pgn.bak")));
+        assertEquals(GAMES, Files.readString(dir.resolve("db.pgn.bak")));
 
-    @Test
-    void eloFilters() {
-        assertEquals(1, db.search().minElo(2600, Search.EloMode.BOTH).count());
-        assertEquals(3, db.search().minElo(2200, Search.EloMode.EITHER).count());
-        // Italian avg 2225 and scholar's mate avg 2050 both fall in range.
-        assertEquals(2, db.search().minElo(2000).maxElo(2300)
-            .eloMode(Search.EloMode.AVERAGE).count());
-    }
-
-    @Test
-    void openingLineAndPositionSearch() {
-        // Both 1.e4 e5 2.Nf3 games pass through the same position.
-        assertEquals(2, db.search().openingLine("1. e4 e5 2. Nf3").count());
-        assertEquals(4, db.search().openingLine("e4").count());
-
-        // Exact FEN containment: the Najdorf tabiya after 5...a6.
-        assertEquals(1, db.search()
-            .containsPosition("rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 0 6")
-            .count());
-    }
-
-    @Test
-    void materialAndEndgameSearch() {
-        // The Lucena game starts as KRP vs KR.
-        List<Game> lucena = db.search().material("KRP vs KR").find();
-        assertEquals(1, lucena.size());
-        assertEquals("Lucena, Practice", lucena.get(0).white());
-
-        // Lucena (KQ vs K) and the underpromotion game (KN vs K) both
-        // reach four or fewer pieces.
-        assertEquals(2, db.search().maxPieces(4).count());
-        assertEquals(2, db.search().motif("promotion").count());
-        assertEquals(1, db.search().motif("underpromotion").count());
-    }
-
-    @Test
-    void motifSearch() {
-        // Two games end in checkmate: the Opera Game and the scholar's mate.
-        assertEquals(2, db.search().motif("checkmate").count());
-        // The underpromotion game features a knight fork.
-        assertTrue(db.search().motif("fork").count() >= 1);
-        List<Motifs.Moment> moments = Motifs.moments(
-            db.search().player("Under, Promo").find().get(0));
-        assertFalse(moments.isEmpty());
-        assertTrue((moments.get(0).motifs() & Motifs.UNDERPROMOTION) != 0);
-        assertTrue((moments.get(0).motifs() & Motifs.FORK) != 0);
-    }
-
-    @Test
-    void commentSearch() {
-        assertEquals(1, db.search().commentContains("queen sacrifice").count());
-        assertEquals(1, db.search().annotated(true).count());
-        assertEquals(5, db.search().annotated(false).count());
-    }
-
-    @Test
-    void sortingAndPagination() {
-        List<Game> byDate = db.search().sortBy(Search.Sort.DATE, false).find();
-        assertEquals("Morphy, Paul", byDate.get(0).white());
-        List<Game> newestFirst = db.search().sortBy(Search.Sort.DATE, true).limit(2).find();
-        assertEquals(2, newestFirst.size());
-        assertEquals("2021.07.16", newestFirst.get(0).sortableDate());
-        assertEquals(1, db.search().sortBy(Search.Sort.DATE, true).offset(5).find().size());
-    }
-
-    // ------------------------------------------------------------------
-    // Explorer
-    // ------------------------------------------------------------------
-
-    @Test
-    void openingExplorer() {
-        OpeningExplorer.Result root = db.explorer().explore("");
-        assertEquals(4, root.totalGames()); // the two FEN games don't start here
-        assertEquals(1, root.moves().size());
-        assertEquals("e4", root.moves().get(0).san());
-        assertEquals(4, root.moves().get(0).games());
-
-        OpeningExplorer.Result afterE4 = db.explorer().explore("1. e4");
-        assertEquals(2, afterE4.moves().size());
-        assertEquals("e5", afterE4.moves().get(0).san());
-        assertEquals(3, afterE4.moves().get(0).games());
-        assertEquals("c5", afterE4.moves().get(1).san());
-
-        OpeningExplorer.Result afterNf3 = db.explorer().explore("1. e4 e5 2. Nf3");
-        assertEquals(2, afterNf3.totalGames());
-        assertEquals("King's Knight Opening", afterNf3.openingName());
-        // Continuations: 2...d6 (Morphy) and 2...Nc6 (Italian)
-        assertEquals(2, afterNf3.moves().size());
-    }
-
-    @Test
-    void explorerScoreAndElo() {
-        OpeningExplorer.Result afterE4 = db.explorer().explore("1. e4");
-        OpeningExplorer.MoveStat e5 = afterE4.moves().get(0);
-        // e5 games: Opera 1-0, Italian 0-1, Scholar 1-0 => 2 white wins, 1 black.
-        assertEquals(2, e5.whiteWins());
-        assertEquals(1, e5.blackWins());
-        assertEquals(0, e5.draws());
-        // Score from Black's perspective (Black plays e5): 1/3.
-        assertFalse(afterE4.whiteToMove());
-        assertEquals(33.3, e5.scorePercent(), 0.1);
-    }
-
-    // ------------------------------------------------------------------
-    // Player stats
-    // ------------------------------------------------------------------
-
-    @Test
-    void playerReport() {
-        PlayerStats.Report rossi = db.players().report("Rossi");
-        assertNotNull(rossi);
-        assertEquals("Rossi, Mario", rossi.name());
-        assertEquals(2, rossi.totalGames());
-        assertEquals(2, rossi.asWhite().games());
-        assertEquals(1, rossi.asWhite().wins());
-        assertEquals(1, rossi.asWhite().losses());
-        assertEquals(50.0, rossi.asWhite().percent());
-        assertNotNull(rossi.performance());
-        assertEquals(2200, rossi.highestElo());
-    }
-
-    @Test
-    void headToHead() {
-        PlayerStats.HeadToHead h2h = db.players().headToHead("Rossi", "Bianchi");
-        assertNotNull(h2h);
-        assertEquals(1, h2h.overall().games());
-        assertEquals(1, h2h.overall().losses());
-        assertNull(db.players().headToHead("Rossi", "Morphy"));
-    }
-
-    // ------------------------------------------------------------------
-    // Duplicates
-    // ------------------------------------------------------------------
-
-    @Test
-    void duplicateDetection() {
-        Database fresh = Database.inMemory();
-        fresh.importPgn(FIXTURE);
-        // Force-add a copy with different tags (bypasses import dedup).
-        Game copy = new com.oriondb.pgn.PgnReader().readString("""
-            [White "Somebody, Else"]
-            [Black "Different, Guy"]
-            [Result "1-0"]
-
-            1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7# 1-0
-            """).games().get(0);
-        fresh.add(copy);
-        List<Duplicates.Group> groups = Duplicates.find(fresh);
-        assertEquals(1, groups.size());
-        assertEquals(2, groups.get(0).gameIds().size());
-        assertFalse(groups.get(0).samePlayers());
-    }
-
-    // ------------------------------------------------------------------
-    // Mutation and persistence
-    // ------------------------------------------------------------------
-
-    @Test
-    void addDeleteSaveReopen() throws Exception {
-        Path file = Files.createTempFile("orion-dbtest", ".pgn");
-        Files.delete(file); // Database.open creates it on save
-        try {
-            try (Database database = Database.open(file)) {
-                database.importPgn(FIXTURE);
-                assertTrue(database.isDirty());
-                database.save();
-                assertFalse(database.isDirty());
+        for (boolean useCache : new boolean[] {true, false}) {
+            try (Database db = Database.open(file, new Database.Options(true, false, useCache, false))) {
+                Snapshot s = db.snapshot();
+                assertEquals(5, s.size());
+                assertEquals(List.of("prep", "sicilian"), s.get(1).labels());
+                assertEquals("Me", s.get(2).tag("Annotator"));
+                assertEquals(1, Searcher.search(s, new Query().withLabel("prep")).total());
+                assertEquals("Najdorf", db.game(1).nodeAtPly(10).comment());
             }
+        }
+    }
 
-            try (Database reopened = Database.open(file)) {
-                reopened.setSaveOnClose(false);
-                assertEquals(6, reopened.gameCount());
-                // Auto-filled ECO survived the round trip.
-                Game opera = reopened.search().player("Morphy").find().get(0);
-                assertEquals("C41", opera.tag("ECO"));
-                // Comments survived.
-                assertEquals(1, reopened.search().commentContains("queen sacrifice").count());
+    @Test
+    void batchesAreAtomic(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(write(dir, "db.pgn", GAMES))) {
+            assertThrows(DatabaseException.class, () -> db.update(b -> {
+                b.delete(1);
+                b.delete(999);
+            }));
+            assertEquals(5, db.size());
+            assertFalse(db.isDirty());
+            db.delete(List.of(1, 3));
+            assertEquals(3, db.size());
+            assertNull(db.snapshot().find(1));
+            assertEquals(0, Searcher.search(db.snapshot(), new Query().position(OpeningExplorer.positionAfter("e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6"))).total() - 1);
+        }
+    }
 
-                // Delete updates indexes.
-                int scholarId = reopened.search().player("Verdi").find().get(0).id();
-                assertTrue(reopened.delete(scholarId));
-                assertEquals(5, reopened.gameCount());
-                assertEquals(3, reopened.explorer().explore("").totalGames());
-                assertEquals(1, reopened.search().motif("checkmate").count());
+    @Test
+    void addReplaceAndPositionOverlay(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(write(dir, "db.pgn", GAMES))) {
+            Game g = Game.fromMoves("d4 d5 c4 e6 Nc3 Nf6");
+            g.tags().set("White", "New");
+            int id = db.add(g);
+            assertEquals(6, id);
+            var ruyLike = OpeningExplorer.positionAfter("d4 Nf6 c4 e6 Nc3 d5");
+            assertEquals(List.of(6), Searcher.ids(db.snapshot(), new Query().position(ruyLike)));
 
-                // Tag edit
-                int najdorfId = reopened.search().player("Kasparov").find().get(0).id();
-                assertTrue(reopened.setTag(najdorfId, "Annotator", "Tester"));
-                reopened.save();
+            Game edit = db.game(id);
+            GameNode last = edit.end();
+            last.setComment("Queen's Gambit Declined");
+            last.play("Bg5");
+            edit.find("d4 d5").play("Nf3");
+            db.replace(id, edit);
+            Game reread = db.game(id);
+            assertEquals(7, reread.plyCount());
+            assertTrue(reread.hasVariations());
+            assertTrue(db.record(id).has(GameRecord.HAS_COMMENTS));
+            assertEquals("New", db.record(id).white());
+            db.save();
+        }
+    }
+
+    @Test
+    void importDedupesAndReportsErrors(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(dir.resolve("new.pgn"))) {
+            ImportResult r = db.importText(GAMES + "\n\n" + GAMES, ImportOptions.DEFAULT.withLabels(List.of("Imported")));
+            assertEquals(10, r.read());
+            assertEquals(4, r.added());
+            assertEquals(4, r.duplicates());
+            assertEquals(2, r.invalid());
+            assertTrue(r.errors().get(0).message().contains("Ke3"));
+            assertTrue(db.record(r.ids().get(0)).hasLabel("imported"));
+            assertThrows(ImportException.class, () -> db.importText(GAMES, ImportOptions.DEFAULT.withAtomic(true).withSkipDuplicates(false)));
+            assertEquals(4, db.size());
+            db.save();
+        }
+        try (Database db = Database.open(dir.resolve("new.pgn"))) {
+            assertEquals(4, db.size());
+        }
+    }
+
+    @Test
+    void detectsExternalModificationAndLocks(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        try (Database db = Database.open(file)) {
+            assertThrows(DatabaseException.class, () -> Database.open(file));
+            try (Database ro = Database.open(file, Database.Options.READ_ONLY)) {
+                assertEquals(5, ro.size());
+                assertThrows(DatabaseException.class, () -> ro.delete(List.of(1)));
             }
+            db.delete(List.of(1));
+            Files.writeString(file, GAMES + "\n");
+            Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 5000));
+            DatabaseException e = assertThrows(DatabaseException.class, db::save);
+            assertTrue(e.getMessage().contains("modified by another program"));
+        }
+    }
 
-            try (Database again = Database.open(file)) {
-                again.setSaveOnClose(false);
-                assertEquals(5, again.gameCount());
-                assertEquals("Tester",
-                    again.search().player("Kasparov").find().get(0).tag("Annotator"));
+    @Test
+    void searchLanguage(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(write(dir, "db.pgn", GAMES))) {
+            Snapshot s = db.snapshot();
+            assertEquals(Set.of(1, 2), ids(s, "player:\"magnus carlsen\""));
+            assertEquals(Set.of(2), ids(s, "player:carlsen as:black outcome:win"));
+            assertEquals(Set.of(1, 2), ids(s, "eco:B90-B99 elo:2800"));
+            assertEquals(Set.of(2), ids(s, "year:2021 variations:yes"));
+            assertEquals(Set.of(1), ids(s, "line:\"1. e4 c5\""));
+            assertEquals(Set.of(3), ids(s, "motif:checkmate motifby:white"));
+            assertEquals(Set.of(), ids(s, "motif:checkmate motifby:black"));
+            assertEquals(Set.of(3), ids(s, "date:<=1800"));
+            assertEquals(Set.of(5), ids(s, "material:\"KR vs KP\" pieces:<=4"));
+            assertEquals(Set.of(5), ids(s, "pattern:\"Kd4 kd6 Pd5\""));
+            assertEquals(Set.of(1, 2), ids(s, "pattern:\"pa6 Nd4 w\""));
+            assertEquals(Set.of(1), ids(s, "comment:najdorf"));
+            assertEquals(Set.of(1, 2), ids(s, "club"));
+            assertEquals(Set.of(3), ids(s, "result:1-0 nolabel:x event:legal"));
+            SearchResult r = Searcher.search(s, QueryParser.parse("sort:-date limit:1"));
+            assertEquals(4, r.total());
+            assertEquals(2, r.matches().get(0).record().id());
+            assertThrows(IllegalArgumentException.class, () -> QueryParser.parse("bogus:1"));
+        }
+    }
+
+    private static Set<Integer> ids(Snapshot s, String q) {
+        return Set.copyOf(Searcher.ids(s, QueryParser.parse(q)));
+    }
+
+    @Test
+    void explorerPlayersAndDuplicates(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(write(dir, "db.pgn", GAMES + "\n\n" + GAMES.substring(0, GAMES.indexOf("[Event \"Club\"]\n[Date")).replace("[Round \"1\"]", "[Round \"2\"]")))) {
+            Snapshot s = db.snapshot();
+            OpeningExplorer.Result start = OpeningExplorer.explore(s, OpeningExplorer.positionAfter(""), null, 3);
+            assertEquals(4, start.games(), "games starting from the initial position");
+            assertEquals("e4", start.moves().get(0).san());
+            assertEquals(3, start.moves().get(0).games());
+
+            OpeningExplorer.Result najdorf = OpeningExplorer.explore(s,
+                OpeningExplorer.positionAfter("e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6"), null, 3);
+            assertEquals(3, najdorf.games());
+            assertEquals(1, najdorf.endedHere());
+            assertEquals("Be3", najdorf.moves().get(0).san());
+
+            PlayerReport.Report rep = PlayerReport.build(s, "carlsen", 5);
+            assertEquals(3, rep.total().games());
+            assertEquals(100.0, rep.total().percent());
+            assertEquals(2860, rep.peakElo());
+            assertEquals(2, rep.asWhite().games());
+
+            HeadToHead.Result h = HeadToHead.compare(s, "Carlsen", "Doe");
+            assertEquals(3, h.total().wins());
+            assertEquals(1, h.aAsBlack().games());
+
+            List<Duplicates.Group> dups = Duplicates.find(s, true, 0);
+            assertEquals(1, dups.size());
+            assertEquals(2, dups.get(0).ids().size());
+
+            DatabaseStats.Stats st = DatabaseStats.compute(s, 5);
+            assertEquals(6, st.games());
+            assertEquals(1, st.invalid());
+            assertEquals(1750, st.firstYear());
+        }
+    }
+
+    @Test
+    void variationPositionsAndPlayerIdentities(@TempDir Path dir) throws Exception {
+        String pgn = """
+            [White "Carlsen,M"]
+            [Black "Kasparov, Garry"]
+            [Result "*"]
+
+            1. e4 e5 (1... c5 2. Nf3 d6 3. d4) 2. Nf3 *
+
+            [White "Carlsen, Magnus"]
+            [Black "Kasparov,G"]
+            [Result "*"]
+
+            1. d4 d5 *
+
+            [White "Carlsen,H"]
+            [Black "Kasparov,Georgy"]
+            [Result "*"]
+
+            1. c4 *
+            """;
+        try (Database db = Database.open(write(dir, "v.pgn", pgn))) {
+            Snapshot s = db.snapshot();
+            var sicilian = OpeningExplorer.positionAfter("e4 c5 Nf3 d6 d4");
+            assertEquals(0, Searcher.search(s, new Query().position(sicilian)).total(), "mainline only by default");
+            SearchResult r = Searcher.search(s, QueryParser.parse("fen:\"" + sicilian.fen() + "\" scope:all"));
+            assertEquals(1, r.total());
+            assertTrue(r.matches().get(0).inVariation());
+            assertEquals(1, OpeningExplorer.explore(s, OpeningExplorer.positionAfter("e4"), null, 1).games(),
+                "explorer counts mainline continuations only");
+            db.update(b -> b.add(Game.fromMoves("e4 c5 Nf3 d6 d4")));
+            assertEquals(2, Searcher.search(db.snapshot(), QueryParser.parse("fen:\"" + sicilian.fen() + "\" scope:all")).total(),
+                "overlay games are searched too");
+
+            assertEquals(Set.of(1, 2), ids(s, "player:\"magnus carlsen\""));
+            assertEquals(Set.of(3), ids(s, "white:\"carlsen h\""));
+            assertEquals(Set.of(1, 2), ids(s, "black:\"kasparov garry\""));
+            assertEquals(Set.of(3), ids(s, "black:\"kasparov georgy\""));
+            var players = com.oriondb.query.PlayerIndex.of(s);
+            assertEquals("Carlsen, Magnus", players.forSpelling("Carlsen,M").name());
+            assertEquals(players.forSpelling("Kasparov,G"), players.forSpelling("Kasparov, Garry"));
+            assertNotEquals(players.forSpelling("Kasparov,Georgy"), players.forSpelling("Kasparov, Garry"));
+            assertSame(players, com.oriondb.query.PlayerIndex.of(s), "memoized per data version");
+        }
+    }
+
+    @Test
+    void listenersSeeNetChanges(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(write(dir, "db.pgn", GAMES), Database.Options.DEFAULT.withAutoSave(true))) {
+            List<Change> commits = new java.util.ArrayList<>();
+            List<Long> saves = new java.util.ArrayList<>();
+            db.addListener(new DatabaseListener() {
+                @Override public void committed(Change c) { commits.add(c); }
+                @Override public void saved(long v) { saves.add(v); }
+            });
+            db.addListener(new DatabaseListener() {
+                @Override public void committed(Change c) { throw new IllegalStateException("ignored"); }
+            });
+            db.update(b -> {
+                int id = b.add(Game.fromMoves("e4"));
+                b.delete(id);              // added and deleted: invisible
+                b.add(Game.fromMoves("d4"));
+                b.setTag(1, "Annotator", "x");
+                b.delete(2);
+            });
+            assertEquals(1, commits.size());
+            Change c = commits.get(0);
+            assertEquals(Set.of(7), c.added());
+            assertEquals(Set.of(1), c.updated());
+            assertEquals(Set.of(2), c.deleted());
+            assertEquals(List.of(c.version()), saves);
+            assertThrows(DatabaseException.class, () -> db.delete(List.of(999)));
+            assertEquals(1, commits.size(), "failed batches notify nothing");
+        }
+    }
+
+    @Test
+    void savesAppendToJournalAndCompactOnClose(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        Path journal = dir.resolve("db.pgn.journal");
+        try (Database db = Database.open(file)) {
+            db.setTag(1, "Annotator", "first");
+            db.save();
+            assertTrue(Files.exists(journal));
+            assertEquals(GAMES, Files.readString(file), "an incremental save leaves the PGN untouched");
+            assertTrue(db.hasJournal());
+            int id = db.add(Game.fromMoves("c4 e5"));
+            db.delete(List.of(2));
+            db.save();
+            // Another process (read-only) sees journaled changes.
+            try (Database ro = Database.open(file, Database.Options.READ_ONLY)) {
+                assertEquals("first", ro.record(1).tag("Annotator"));
+                assertNull(ro.snapshot().find(2));
+                assertEquals(1, Searcher.search(ro.snapshot(), QueryParser.parse("line:\"1. c4 e5\"")).total());
             }
-        } finally {
-            Files.deleteIfExists(file);
+            assertEquals(6, id);
+        }
+        assertFalse(Files.exists(journal), "close compacts the journal into the PGN");
+        String pgn = Files.readString(file);
+        assertTrue(pgn.contains("[Annotator \"first\"]"));
+        assertFalse(pgn.contains("[White \"Doe, John\"]\n[Black \"Carlsen"), "deleted game is gone");
+        try (Database db = Database.open(file)) {
+            assertEquals(5, db.size());
+            assertEquals(6, Searcher.ids(db.snapshot(), QueryParser.parse("line:\"1. c4 e5\"")).get(0));
+        }
+    }
+
+    @Test
+    void journalSurvivesCrashAndIgnoresTornTail(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        Path journal = dir.resolve("db.pgn.journal");
+        Database db = Database.open(file, Database.Options.DEFAULT.withCompactOnClose(false));
+        db.setTag(1, "Annotator", "kept");
+        db.save();
+        db.setTag(3, "Annotator", "also kept");
+        db.save();
+        db.close(); // journal stays (compactOnClose off), as after a crash
+        assertTrue(Files.exists(journal));
+        // Simulate a torn write: garbage appended after the last commit.
+        Files.write(journal, new byte[] {0, 0, 0, 40, 1, 2, 3}, java.nio.file.StandardOpenOption.APPEND);
+        try (Database again = Database.open(file, Database.Options.DEFAULT.withCompactOnClose(false))) {
+            assertEquals("kept", again.record(1).tag("Annotator"));
+            assertEquals("also kept", again.record(3).tag("Annotator"));
+            again.setTag(4, "Annotator", "after recovery");
+            again.save();
+        }
+        try (Database last = Database.open(file)) {
+            assertEquals("after recovery", last.record(4).tag("Annotator"));
+            assertEquals("kept", last.record(1).tag("Annotator"));
+        }
+        assertFalse(Files.exists(journal));
+    }
+
+    @Test
+    void journalForAnotherPgnVersionIsRefused(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        try (Database db = Database.open(file, Database.Options.DEFAULT.withCompactOnClose(false))) {
+            db.setTag(1, "Annotator", "x");
+            db.save();
+        }
+        Files.writeString(file, GAMES + "\n");
+        DatabaseException e = assertThrows(DatabaseException.class, () -> Database.open(file));
+        assertTrue(e.getMessage().contains("different version"), e.getMessage());
+    }
+
+    @Test
+    void materialSignatures() {
+        long sig = Material.parse("KRP vs KR");
+        assertEquals("KRP vs KR", Material.format(sig));
+        assertEquals(sig, Material.parse("KRPKR"));
+        assertEquals("KR vs KRP", Material.format(Material.mirror(sig)));
+        assertEquals(5, Material.pieceCount(sig));
+    }
+
+    @Test
+    void inMemoryDatabase() {
+        try (Database db = Database.inMemory()) {
+            int id = db.add(Game.fromMoves("e4 e5"));
+            db.save();
+            assertEquals(1, id);
+            assertTrue(db.pgn(id).contains("1. e4 e5"));
         }
     }
 }

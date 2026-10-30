@@ -1,309 +1,251 @@
-# OrionDB — a chess database with a built-in MCP server
+# OrionDB — a chess database engine
 
 > **Author:** [Ghassan Alhamoud](https://ghassan-alhamoud.com)
 
-OrionDB is a chess database engine for personal collections: a few hundred to
-a few tens of thousands of games, with the search depth of a professional
-database and a **built-in [MCP](https://modelcontextprotocol.io) server** so AI
-agents (Claude Code, Claude Desktop, or any MCP client) can query and edit your
-games directly.
+OrionDB is a complete chess database engine for personal and club collections
+(up to roughly 100k–200k games on a laptop). It has the search depth of a
+commercial database, UCI engine analysis, a scriptable CLI, and a **built-in
+[MCP](https://modelcontextprotocol.io) server**, so AI agents can query and
+edit your games directly.
 
-**Your database file is plain PGN.** Every chess program can open it; OrionDB
-adds validation, indexing, and search on top. No proprietary format, no lock-in,
-nothing to migrate.
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                      oriondb.jar                        │
-│                                                         │
-│  CLI (humans)                    MCP server (agents)    │
-│  search / explorer / player      MCP tools over stdio   │
-│        └──────────────┬──────────────┘                  │
-│                  Search engine                          │
-│   metadata · positions · material · tactics · text      │
-│                       │                                 │
-│               In-memory database                        │
-│   Zobrist position index · ECO book · player stats      │
-│                       │                                 │
-│              Legal-move chess core                      │
-│   perft-validated movegen · SAN · FEN · lossless PGN    │
-└─────────────────────────────────────────────────────────┘
-                          │
-                    your-games.pgn
-```
+**Your database is a plain PGN file.** Every chess program can open it.
+OrionDB adds a persistent index next to it (`mygames.pgn.oidx`, a disposable
+cache), validation, search, statistics and editing. There is no proprietary
+format and no lock-in.
 
 ## Highlights
 
-- **Correct chess.** Full legal move generation (pins, checks, castling
-  legality, en passant), validated by perft against reference positions.
-  Every imported move is replayed and normalized; an invalid FEN or illegal
-  mainline rejects the whole game with a structured source-game error.
-- **Lossless PGN.** Variations, comments, NAGs, `%` escape lines, glued move
-  numbers, `0-0` castling, Latin-1 legacy files, FEN set-up games — read,
-  preserved, and written back in clean export format. File imports and saves
-  stream instead of constructing a second full-file copy in memory.
-- **Transposition-aware position search.** Zobrist hashing means "find games
-  reaching this position" works regardless of move order.
-- **Opening explorer.** For any position: every continuation with game counts,
-  W/D/L, score for the side to move, average Elo of the movers, last-played
-  date, and sample games — like the big commercial databases.
-- **ECO auto-classification.** The lichess opening book (3,800+ named lines,
-  CC0) is embedded. Games missing ECO/Opening tags get them filled in on
-  import, transposition-aware.
-- **Tactics search.** Forks, pins, skewers, discovered/double checks,
-  promotions, underpromotions, en passant captures, checkmates — detected on
-  import, searchable instantly, listed per game.
-- **Endgame search.** By material signature ("KRP vs KR") or piece count
-  ("positions with ≤ 6 pieces").
-- **Player intelligence.** Dossiers (W/D/L by color, performance rating,
-  repertoire with scores, best wins) and head-to-head reports.
-- **Duplicate detection**, comment full-text search, pawn-structure filters
-  (IQP, passed pawns, ...), date/Elo/event/result filters, sorting, pagination.
-- **First-class game tags.** Categorize one game or update many at once, then
-  search for all/any tags or exclude tags. Values are case-insensitive and
-  persist in the portable `OrionTags` PGN header. Exact tag filters use an
-  in-memory inverted index.
-- **Stable game identity.** Database-assigned ids survive deletes and restarts
-  through the portable `OrionDBId` PGN tag.
-- **Zero-infrastructure.** One 500 KB jar, one PGN file. Durable atomic saves
-  reject conflicting edits made by another process and keep the previous
-  generation in `your-games.pgn.bak`.
-  12,500 real master games import in ~7 s and reopen in ~6 s on a laptop;
-  a 3,000-game personal collection feels instant.
+- **Correct chess.** Bitboard move generation validated by perft (standard and
+  Chess960), full legality, SAN/UCI/FEN/X-FEN.
+- **Lossless, forgiving PGN.** Variations, comments, NAGs, `[%clk]`/`[%eval]`
+  commands, set-up positions, Chess960, Latin-1 legacy files, sloppy real-world
+  syntax. Games that fail to parse are kept verbatim and reported, never
+  dropped.
+- **Fast at scale.** 100,000 games reopen in under a second. Most queries take
+  milliseconds (see [docs/architecture.md](docs/architecture.md)).
+- **Search everything.** Combine any of these:
+  - Players: accent- and order-insensitive, aware of name variants ("Magnus
+    Carlsen" finds `Carlsen,M` and `Carlsen, Magnus` but not `Carlsen,H`); also
+    color and outcome
+  - Event, site, dates, results, ECO ranges, opening names, Elo (either/both/average) and game length
+  - Opening line, exact position (transposition-aware, optionally inside variations), and **piece patterns** (`"Kg1 kg8 Pe5 -pd5 R*7"`)
+  - Material signatures (`KRP vs KR`) and piece counts
+  - Tactical motifs, pawn structures, labels, comments, annotations and arbitrary tags
+
+  - Moves played (`move:Bxh7+`), move sequences anywhere in the game, and
+    material balance reached
+
+  Combine them with `OR`, `NOT` and parentheses, sort them, and page with
+  offsets or stable cursors. The same filters are available as a fluent API
+  and as a text query language.
+- **Opening explorer** for any position: games, W/D/L, score, average rating,
+  performance, last played and top games per move, with ECO names from the
+  embedded lichess book.
+- **Tactics and structures detected on import:**
+  - Motifs: forks, pins, skewers, discovered and double checks, sacrifices, queen sacrifices
+  - Mates: smothered and back-rank mates
+  - Special moves: underpromotions and en passant
+  - Pawn structures: IQP, hanging pawns, passed and connected passers, Carlsbad, Maroczy bind, Stonewall, opposite-coloured bishops
+- **Player intelligence.**
+  - Dossiers: results by colour and year, performance, peak and latest rating, repertoire with scores, opponents, best wins and worst losses
+  - Head-to-head records
+- **Game editing.** Add or promote/delete variations, comments, NAGs and
+  `[%eval]` commands. Edit tags in place without reformatting the rest of the
+  game.
+- **Engine analysis.**
+  - Any UCI engine (Stockfish auto-detected), with multi-PV analysis
+  - Full-game annotation: `?!`/`?`/`??` NAGs, evaluations, best-line variations
+  - Per-side accuracy and average centipawn loss (lichess formulas)
+- **Labels** for organising games (`prep`, `to-review`, ...), stored in the PGN
+  itself.
+- **Safe writes.**
+  - Atomic batches (all-or-nothing)
+  - Incremental saves: only changed games are appended to a checksummed
+    journal (about 9 ms per edit at 100k games), and the journal is folded
+    into the PGN on close or when it grows
+  - Crash-safe compaction: temp file, fsync, `.bak`, atomic rename
+  - A process lock against concurrent writers
+  - Saves are refused if another program changed the file
 
 ## Quick start
 
-Requires Java 17+ (build with Maven).
+Requires Java 21+ and Maven.
 
 ```bash
-mvn -q package
-```
-
-Everything runs through the launcher (or `java -jar target/oriondb.jar ...`):
-
-```bash
-# Create a database by importing PGN into it
-./bin/oriondb import mygames.pgn some-collection.pgn
-
-# Overview
+mvn -q package                      # builds target/oriondb.jar
+./bin/oriondb import mygames.pgn downloads/*.pgn --label inbox
 ./bin/oriondb stats mygames.pgn
-
-# Search
-./bin/oriondb search mygames.pgn --player Carlsen --eco B90 --result white --limit 10
-./bin/oriondb search mygames.pgn --material "KRP vs KR" --max-pieces 6
-./bin/oriondb search mygames.pgn --motif underpromotion
-./bin/oriondb search mygames.pgn --opening-line "1. e4 c5 2. Nf3 d6" --min-elo 2700
-./bin/oriondb search mygames.pgn --tag opening-prep --without-tag reviewed
-
-# Categorize one or many games
-./bin/oriondb tag mygames.pgn --ids 17 --add "tactics,study"
-./bin/oriondb tag mygames.pgn --ids 1,5,9 --add reviewed --remove inbox
-./bin/oriondb tag mygames.pgn --ids 17 --set "favorite,opening prep"
-./bin/oriondb tag mygames.pgn --player Carlsen --tagged inbox --add reviewed
-./bin/oriondb tag mygames.pgn --rename opening-prep --to "opening prep"
-./bin/oriondb tag mygames.pgn --merge todo --into inbox
-./bin/oriondb tag mygames.pgn --delete-tag obsolete
-
-# Opening explorer from any position
-./bin/oriondb explorer mygames.pgn "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6"
-
-# One game with its tactical moments
-./bin/oriondb game mygames.pgn 17
-
-# Players
-./bin/oriondb player mygames.pgn "Kasparov"
-./bin/oriondb h2h mygames.pgn "Kasparov" "Karpov"
-
-# Maintenance
-./bin/oriondb dedupe mygames.pgn
-./bin/oriondb export mygames.pgn --ids 1,5,9 -o best.pgn
 ```
+
+### Search
+
+```bash
+./bin/oriondb search mygames.pgn player:carlsen as:white outcome:win eco:B90-B99 sort:-date
+./bin/oriondb search mygames.pgn material:"KRP vs KR" elo:2600
+./bin/oriondb search mygames.pgn pattern:"Ng5 Qh5 kg8" motif:sacrifice
+./bin/oriondb search mygames.pgn fen:"r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+./bin/oriondb search mygames.pgn structure:iqp structureby:white year:2015..2024 --format pgn
+./bin/oriondb help search          # the full query language
+```
+
+### Explore and analyze
+
+```bash
+./bin/oriondb explore mygames.pgn 1. e4 c5 2. Nf3 --filter "elo:2500"
+./bin/oriondb player mygames.pgn "Magnus Carlsen"
+./bin/oriondb h2h mygames.pgn Kasparov Karpov
+./bin/oriondb game mygames.pgn 17 --ply 30
+./bin/oriondb board "1. e4 e5 2. Nf3 Nc6 3. Bb5"
+```
+
+### Organise
+
+```bash
+./bin/oriondb label mygames.pgn --query "player:carlsen eco:B90-B99" --add prep
+./bin/oriondb labels mygames.pgn
+./bin/oriondb tag mygames.pgn 17 Annotator "Me"
+./bin/oriondb dedupe mygames.pgn            # dry run; --apply to remove copies
+./bin/oriondb export mygames.pgn label:prep -o prep.pgn
+./bin/oriondb check mygames.pgn             # games that failed to parse
+```
+
+### Engine
+
+Needs Stockfish on PATH, or set `ORIONDB_ENGINE=/path/to/engine`.
+
+```bash
+./bin/oriondb analyze "1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6" --depth 20 --multipv 3
+./bin/oriondb annotate mygames.pgn 17 --depth 18
+```
+
+### Query language
+
+Terms are `key:value` and are AND-combined. Use `OR`, `NOT` (or a leading
+`-`) and parentheses for more, e.g.
+`(eco:B90-B99 OR eco:C00-C19) -result:draw elo:2600`. Quote values that
+contain spaces. Bare words search players, event, site and opening.
+
+| Key | Examples |
+|---|---|
+| players | `white:` `black:` `player:carlsen` `as:white` `outcome:win` |
+| metadata | `event:` `site:` `round:` `opening:najdorf` `tag:TimeControl=180+2` |
+| dates | `year:2020` `date:2019.05..2021` `date:>=2015` |
+| results | `result:1-0` `result:draw` `result:decisive` |
+| openings | `eco:B90` `eco:B9` `eco:B90-B99` `line:"1. e4 c5 2. Nf3"` |
+| ratings | `elo:2600` `elo:2500..2700` `elomode:both` |
+| length | `moves:20..40` `plies:<=60` |
+| positions | `fen:"<FEN>"` `scope:all` (also inside variations) `pattern:"Kg1 kg8 R*7 -pd5 .f7 w"` |
+| endgames | `material:"KRP vs KR"` `material!:...` (exact colours) `pieces:<=6` |
+| tactics | `motif:fork,sacrifice,castling` `motifby:black` |
+| moves | `move:Bxh7+` `move:Q*#` `move:e8=Q` `sequence:"Bxh7+ Kxh7 Ng5+"` `moveby:white` `movenum:10..25` |
+| material balance | `balance:>=3` `balance:-1..1` (White minus Black, in pawns, reached at some point) |
+| structure | `structure:iqp,isolated,passed,advanced_passer,doubled,hanging_pawns,carlsbad` `structureby:white` |
+| organisation | `label:prep` `anylabel:a,b` `nolabel:done` `id:1,5,9` |
+| annotations | `annotated:yes` `comments:yes` `variations:yes` `evals:yes` `comment:"novelty"` |
+| output | `sort:-date` (`date` `white` `black` `event` `elo` `whiteelo` `blackelo` `ply` `eco` `id`) `limit:20` `offset:40` `after:<cursor>` |
 
 ## The MCP server (for AI agents)
 
-The MCP server is built into the same jar — not a wrapper, not a separate
-process to manage. It speaks MCP over stdio:
+The MCP server is part of the same jar and speaks MCP over stdio:
 
 ```bash
-./bin/oriondb mcp mygames.pgn
+./bin/oriondb mcp mygames.pgn              # read/write, auto-saves every change
+./bin/oriondb mcp mygames.pgn --read-only
 ```
 
-### Claude Code
-
-This repository ships a [.mcp.json](.mcp.json) pointing at the sample
-database; edit the path to your own PGN. Or register it anywhere with:
+Register it with Claude Code:
 
 ```bash
 claude mcp add oriondb -- /path/to/orion-chess-db/bin/oriondb mcp /path/to/mygames.pgn
 ```
 
-### Claude Desktop
+Or with Claude Desktop (`claude_desktop_config.json`):
 
 ```json
-{
-  "mcpServers": {
-    "oriondb": {
-      "command": "/path/to/orion-chess-db/bin/oriondb",
-      "args": ["mcp", "/path/to/mygames.pgn"]
-    }
-  }
-}
+{ "mcpServers": { "oriondb": {
+    "command": "/path/to/orion-chess-db/bin/oriondb",
+    "args": ["mcp", "/path/to/mygames.pgn"] } } }
 ```
 
-### Tools
+The tools cover:
 
-| Tool | What it does |
-|---|---|
-| `db_stats` | Game count, players, date range, top openings and tags |
-| `search_games` | Every filter below, AND-combined, with sort + pagination |
-| `get_game` | Full game: tags, moves, PGN, final FEN, tactical moments |
-| `opening_explorer` | Move statistics tree for any position |
-| `position_search` | Games reaching a FEN position (+ where and what came next) |
-| `player_report` | Dossier: W/D/L, performance, repertoire, best wins |
-| `head_to_head` | Two players' lifetime score, split by color |
-| `import_pgn` | Strict import with deduplication and structured per-game errors |
-| `add_game` | Add a single game, returns its id |
-| `delete_game` | Remove a game |
-| `set_tag` | Edit or remove a PGN tag |
-| `update_game_tags` | Add, remove, or replace categories on one or many games |
-| `tag_games_by_search` | Tag every game matching metadata, position, or tag filters |
-| `manage_game_tag` | Rename, merge, or delete a tag everywhere |
-| `batch_mutate` | Apply multiple mutations atomically and save once |
-| `export_pgn` | Export by ids or everything, to text or file |
-| `find_duplicates` | Groups of games with identical moves |
+- Search (structured filters or the query language)
+- Reading games and positions
+- The opening explorer
+- Player reports and head-to-head records
+- Import
+- Adding and editing games (variations, comments, NAGs, evals)
+- Tags and labels
+- Deletion and deduplication
+- Export
+- Engine analysis and game annotation
+- An atomic `batch` tool
 
-Mutations save to disk automatically (atomic temp-file + rename).
-The CLI and MCP server also hold `your-games.pgn.lock` while they can mutate a
-database, so a second writer fails fast instead of racing the first.
+Every mutation is saved crash-safely, and game ids are stable across sessions.
 
-`search_games` filters: `white`, `black`, `player`, `event`, `site`, `eco`
-(exact / prefix / range), `opening`, `result`, `date_from`, `date_to`,
-`min_elo`, `max_elo`, `elo_mode` (either/both/average), `min_ply`, `max_ply`,
-`opening_line`, `contains_fen`, `material`, `max_pieces`, `motif`,
-`pawn_feature`, `comment_contains`, `tags`, `tag_mode` (all/any),
-`exclude_tags`, `annotated`, `sort_by`, `descending`, `limit`, `offset`.
+## Embedding in an application
+
+OrionDB is designed as the data layer under an application (desktop, server
+or agent). The guarantees an application can rely on:
+
+- **Threading.** `Database` is thread-safe. Reads go through immutable
+  `Snapshot`s and never block or see half-applied changes. Writes are
+  serialized; each `batch` is atomic.
+- **Identity.** Game ids are stable across restarts, edits and saves (stored
+  in the PGN as `OrionId`). Player identities come from `PlayerIndex`, which
+  groups spelling variants; its `id` is stable for a given set of games.
+- **Change events.** `db.addListener(...)` reports the added, updated and
+  deleted ids of every commit (`Change`) and every save, so views and caches
+  can refresh incrementally.
+- **Caching.** `snapshot.derived(key, supplier)` memoizes any computed value
+  per data version (OrionDB uses it for the player index), which is a cheap
+  place to hang application-level caches.
+- **Processes.** One writer per file (OS lock); any number of read-only
+  openers. Read-only openers see journaled saves too. Saves refuse to
+  overwrite external edits.
+- **Durability.** `save()` is cheap (journal append plus fsync), so an app can
+  save after every user action. `compact()` folds the journal into the PGN.
+  This also happens on `close()` by default (`Options.withCompactOnClose`),
+  and automatically once the journal passes a quarter of the PGN size.
+- **Paging.** `SearchResult.nextCursor()` with `Query.after(cursor)` gives
+  pages that stay consistent while games are added or removed.
+- **Scope.** Network importers (Lichess, Chess.com), user accounts and UI
+  belong to the application. Feed games in via `importText`, `importFile` or
+  `add`.
 
 ## Library use
 
 ```java
 try (Database db = Database.open(Path.of("mygames.pgn"))) {
-    // Fluent search
-    List<Game> games = db.search()
-        .player("Carlsen").eco("B90-B99")
-        .minElo(2700, Search.EloMode.BOTH)
-        .sortBy(Search.Sort.DATE, true).limit(20)
-        .find();
+    Snapshot snap = db.snapshot();
+    SearchResult r = Searcher.search(snap, QueryParser.parse("player:carlsen eco:B90-B99 sort:-date"));
+    OpeningExplorer.Result tree = OpeningExplorer.explore(snap, OpeningExplorer.positionAfter("e4 c5 Nf3"), null, 3);
 
-    // Opening explorer
-    OpeningExplorer.Result tree = db.explorer().explore("1. e4 c5 2. Nf3");
-    // Player dossier
-    PlayerStats.Report report = db.players().report("Kasparov");
-    // Tactics of one game
-    List<Motifs.Moment> moments = Motifs.moments(games.get(0));
+    int id = r.matches().get(0).record().id();
+    Game g = db.game(id);                                  // full tree: variations, comments, NAGs
+    g.find("e4 c5 Nf3").play("d6").setComment("Main line");
+    db.replace(id, g);                                     // atomic; id and labels kept
+    db.update(b -> b.updateLabels(id, List.of("studied"), List.of()));
+    db.save();                                             // crash-safe write of the PGN
 
-    // Categorize games individually or in a batch.
-    db.addGameTags(games.get(0).id(), "tactics", "study");
-    db.updateGameTags(
-        games.stream().map(Game::id).toList(),
-        List.of("reviewed"), List.of("inbox"));
-    List<Game> tagged = db.search()
-        .tags("tactics", "study")       // all supplied tags
-        .withoutTag("archived")
-        .find();
-    db.search().player("Carlsen").tag("inbox")
-        .addGameTags("reviewed");
-    db.renameGameTag("opening-prep", "opening prep");
-    db.mergeGameTag("todo", "inbox");
-    db.deleteGameTag("obsolete");
-
-    // Stored games are read-only so indexes cannot silently become stale.
-    // Copy and atomically replace a game when editing moves or annotations.
-    Game edited = games.get(0).copy();
-    edited.setTag("Annotator", "My Tool");
-    db.replace(edited.id(), edited);
-
-    // Multiple changes commit together. Any exception restores games,
-    // assigned ids, and derived indexes.
-    db.transactionAndSave(tx -> {
-        tx.setTag(edited.id(), "Annotator", "My Tool");
-        tx.addGameTags(edited.id(), "reviewed");
-        return null;
+    db.addListener(new DatabaseListener() {                // keep app views in sync
+        @Override public void committed(Change c) { refresh(c.added(), c.updated(), c.deleted()); }
     });
+    List<PlayerIndex.Player> hits = PlayerIndex.of(db.snapshot()).search("carlsen", 10);  // autocomplete
 }
 ```
 
-`Database.open(path)` enables one-generation backups but does not take a
-process lock, which keeps read-only embedding simple. Long-lived writers can
-opt into exclusive access:
+See [examples/ApiExample.java](examples/ApiExample.java) for a fuller tour.
 
-```java
-try (Database db = Database.open(
-        Path.of("mygames.pgn"), Database.OpenOptions.locked())) {
-    // Mutate and save while holding mygames.pgn.lock.
-}
+## Development
+
+```bash
+mvn -q test                                              # unit + integration tests
+mvn -q test -Dtest=PerftTest -Doriondb.slow=true         # deep perft
+mvn -q test -Dtest=DatabasePerfTest -Doriondb.slow=true -Doriondb.perf.games=50000
 ```
 
-Use `db.setBackupsEnabled(false)` only when another layer already manages
-recovery copies.
+Architecture and design decisions: [docs/architecture.md](docs/architecture.md).
 
-See [examples/ApiExample.java](examples/ApiExample.java) for a complete
-program, and [examples/famous-games.pgn](examples/famous-games.pgn) for a tiny
-sample database.
-
-## Design notes
-
-- **PGN is the storage format.** At this scale (thousands of games, not
-  millions) everything fits comfortably in memory: opening a database
-  re-validates and re-indexes it (parallelized across cores), which takes a
-  couple of seconds and guarantees indexes are never stale. Stable ids use
-  the `OrionDBId` tag plus one standard PGN `%` escape line for the next id.
-  Saves are atomic, flushed before rename, keep one previous generation, and
-  refuse to overwrite a backing file changed since it was opened. An optional
-  sidecar-file lock coordinates writers across processes and remains valid
-  when the PGN inode is atomically replaced.
-- **Indexes follow measured queries.** Positions and categorical tags have
-  inverted indexes. Substring metadata filters remain scans because exact
-  indexes do not serve their semantics at the intended collection size. See
-  [the repeatable performance profile](docs/performance.md).
-- **Mutation is explicit.** Games returned by `game`, `games`, and searches are
-  read-only. Use `copy()` plus `replace(id, game)` for an atomic validated edit,
-  or `setTag` for metadata. Read methods return snapshots or defensive copies,
-  making concurrent readers safe while writes are serialized.
-- **Batches are transactional.** `transaction` restores games, ids, import
-  state, and indexes when its callback fails. `transactionAndSave` adds one
-  persistence step after all operations succeed. Persistence calls are blocked
-  inside callbacks so a partial batch cannot escape early.
-- **The chess core is the foundation.** SAN disambiguation legally requires
-  pin-aware move generation (`Re2` when one rook is pinned), so the engine
-  implements full legality and is perft-validated. Zobrist hashes use the
-  polyglot en-passant convention so transpositions that differ only in an
-  irrelevant e.p. square identify.
-- **Variations are first-class.** The move tree preserves RAVs, comments, and
-  NAGs through import/export round trips. Mainline positions are indexed;
-  variations are kept and searchable by text.
-- **Dependencies:** Gson (for the MCP JSON layer). That's it.
-
-## Project layout
-
-```
-src/main/java/com/oriondb/
-  chess/      Board, legal movegen, SAN, FEN, Zobrist
-  model/      Game, GameTags, MoveNode (move tree), replay helpers
-  pgn/        PgnReader (tolerant tokenizer), PgnWriter
-  eco/        EcoClassifier + embedded openings book (CC0)
-  analysis/   Material signatures, pawn features, tactical motifs
-  db/         Database (PGN persistence, indexes), GameData
-  search/     Search, OpeningExplorer, PlayerStats, Duplicates
-  mcp/        McpServer (stdio JSON-RPC), DbTools (tool catalog)
-  cli/        Main
-```
-
-## Acknowledgements
-
-- Opening classifications from
-  [lichess-org/chess-openings](https://github.com/lichess-org/chess-openings)
-  (CC0), embedded in `src/main/resources/com/oriondb/eco/openings.tsv`.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+The ECO book is the [lichess chess-openings](https://github.com/lichess-org/chess-openings)
+dataset (CC0). OrionDB is MIT licensed.

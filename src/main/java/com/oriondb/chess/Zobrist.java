@@ -3,71 +3,49 @@ package com.oriondb.chess;
 import java.util.SplittableRandom;
 
 /**
- * Zobrist hashing tables for position identity.
- *
- * Keys are deterministic across runs and platforms (SplittableRandom with a
- * fixed seed has a specified algorithm), so hashes can be persisted in cache
- * files. The en-passant file is only hashed when an enemy pawn could actually
- * capture (polyglot convention), so transpositions that differ only in an
- * irrelevant e.p. square hash identically.
+ * Zobrist keys. Generated from a fixed seed so keys are identical across
+ * runs and safe to persist in index files. The en passant file is hashed
+ * only when a capture is possible (positions store the e.p. square only
+ * then), so transpositions hash identically.
  */
 public final class Zobrist {
-    // Indexed by piece code (0-13, gaps at 6-7 unused) and square.
-    static final long[][] PIECE = new long[16][64];
-    static final long[] CASTLING = new long[16];
-    static final long[] EP_FILE = new long[8];
-    static final long SIDE_BLACK;
+    private static final long[][] PIECE_SQUARE = new long[12][64];
+    private static final long[] CASTLING = new long[16];
+    private static final long[] EP_FILE = new long[8];
+    private static final long BLACK_TO_MOVE;
 
     static {
-        SplittableRandom rng = new SplittableRandom(0x0510EC0DBC0FFEEL);
-        for (int piece = 0; piece < 16; piece++) {
-            for (int sq = 0; sq < 64; sq++) {
-                PIECE[piece][sq] = rng.nextLong();
-            }
+        SplittableRandom rnd = new SplittableRandom(0x0D10_DB5EED_2026L);
+        for (long[] row : PIECE_SQUARE) {
+            for (int i = 0; i < 64; i++) row[i] = rnd.nextLong();
         }
-        for (int i = 0; i < 16; i++) {
-            CASTLING[i] = rng.nextLong();
+        long[] rights = new long[4];
+        for (int i = 0; i < 4; i++) rights[i] = rnd.nextLong();
+        for (int mask = 0; mask < 16; mask++) {
+            long k = 0;
+            for (int i = 0; i < 4; i++) if ((mask & (1 << i)) != 0) k ^= rights[i];
+            CASTLING[mask] = k;
         }
-        for (int i = 0; i < 8; i++) {
-            EP_FILE[i] = rng.nextLong();
-        }
-        SIDE_BLACK = rng.nextLong();
+        for (int i = 0; i < 8; i++) EP_FILE[i] = rnd.nextLong();
+        BLACK_TO_MOVE = rnd.nextLong();
     }
 
     private Zobrist() {}
 
-    /**
-     * Full hash of a position. The e.p. component is included only when an
-     * enemy pawn is adjacent to the double-pushed pawn (could pseudo-legally
-     * capture).
-     */
-    static long hash(int[] squares, int sideToMove, int castling, int epSquare) {
-        long h = 0;
-        for (int sq = 0; sq < 64; sq++) {
-            int piece = squares[sq];
-            if (piece != Piece.NONE) {
-                h ^= PIECE[piece][sq];
-            }
-        }
-        h ^= CASTLING[castling & 15];
-        if (sideToMove == Piece.BLACK) {
-            h ^= SIDE_BLACK;
-        }
-        if (epSquare != Square.NONE && epRelevant(squares, sideToMove, epSquare)) {
-            h ^= EP_FILE[Square.file(epSquare)];
-        }
-        return h;
+    static long piece(int piece, int sq) {
+        return PIECE_SQUARE[piece][sq];
     }
 
-    /** True if a pawn of {@code sideToMove} sits adjacent to the e.p. target's pawn. */
-    private static boolean epRelevant(int[] squares, int sideToMove, int epSquare) {
-        // A capturing pawn stands on the same rank as the double-pushed pawn:
-        // one rank before the e.p. square from the capturer's point of view.
-        int pawnRank = Square.rank(epSquare) + (sideToMove == Piece.WHITE ? -1 : 1);
-        int file = Square.file(epSquare);
-        int capturer = Piece.PAWN | sideToMove;
-        if (file > 0 && squares[Square.of(file - 1, pawnRank)] == capturer) return true;
-        if (file < 7 && squares[Square.of(file + 1, pawnRank)] == capturer) return true;
-        return false;
+    /** Key of a castling-rights mask (bit 0 white O-O, 1 white O-O-O, 2 black O-O, 3 black O-O-O). */
+    static long castling(int rightsMask) {
+        return CASTLING[rightsMask];
+    }
+
+    static long epFile(int file) {
+        return EP_FILE[file];
+    }
+
+    static long blackToMove() {
+        return BLACK_TO_MOVE;
     }
 }
