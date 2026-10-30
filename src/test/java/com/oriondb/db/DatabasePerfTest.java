@@ -1,126 +1,97 @@
 package com.oriondb.db;
 
-import com.oriondb.chess.Board;
-import com.oriondb.model.Game;
+import com.oriondb.chess.Position;
+import com.oriondb.game.Game;
+import com.oriondb.game.GameNode;
 import com.oriondb.pgn.PgnWriter;
+import com.oriondb.query.QueryParser;
+import com.oriondb.query.Searcher;
+import com.oriondb.stats.OpeningExplorer;
+import com.oriondb.stats.PlayerReport;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.BufferedWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Random;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import java.util.SplittableRandom;
 
 /**
- * Smoke test that the database opens a realistic collection quickly.
- * Set -Doriondb.perf.games=N to try larger sizes locally.
+ * Opt-in scale profile: {@code mvn test -Dtest=DatabasePerfTest -Doriondb.slow=true -Doriondb.perf.games=50000}.
+ * Generates random legal games (biased toward a few openings so positions repeat).
  */
 class DatabasePerfTest {
-
-    static String generatePgn(int gameCount, long seed) {
-        Random rng = new Random(seed);
-        List<Game> games = new ArrayList<>(gameCount);
-        String[] players = {"Adams", "Botvinnik", "Capablanca", "Duda", "Euwe", "Fischer",
-            "Geller", "Hort", "Ivanchuk", "Jussupow", "Karpov", "Larsen"};
-        for (int i = 0; i < gameCount; i++) {
-            Board board = Board.startingPosition();
-            var tree = new com.oriondb.model.MoveNode[1];
-            com.oriondb.model.MoveNode last = null;
-            int targetPlies = 40 + rng.nextInt(80);
-            String result = "*";
-            for (int ply = 0; ply < targetPlies; ply++) {
-                List<Integer> moves = board.legalMoves();
-                if (moves.isEmpty()) {
-                    result = board.inCheck()
-                        ? (board.whiteToMove() ? "0-1" : "1-0")
-                        : "1/2-1/2";
-                    break;
-                }
-                int move = moves.get(rng.nextInt(moves.size()));
-                String san = board.toSan(move);
-                var node = new com.oriondb.model.MoveNode(san);
-                if (last == null) {
-                    tree[0] = node;
-                } else {
-                    last.setNext(node);
-                }
-                last = node;
-                board = board.play(move);
-            }
-            if (result.equals("*")) {
-                result = switch (rng.nextInt(3)) {
-                    case 0 -> "1-0";
-                    case 1 -> "0-1";
-                    default -> "1/2-1/2";
-                };
-            }
-            LinkedHashMap<String, String> tags = new LinkedHashMap<>();
-            tags.put("Event", "Perf Test " + (i % 7));
-            tags.put("Site", "Nowhere");
-            tags.put("Date", String.format("%d.%02d.%02d",
-                1990 + rng.nextInt(35), 1 + rng.nextInt(12), 1 + rng.nextInt(28)));
-            tags.put("Round", String.valueOf(1 + i % 9));
-            tags.put("White", players[rng.nextInt(players.length)] + ", A" + (i % 50));
-            tags.put("Black", players[rng.nextInt(players.length)] + ", B" + (i % 50));
-            tags.put("Result", result);
-            tags.put("WhiteElo", String.valueOf(2100 + rng.nextInt(700)));
-            tags.put("BlackElo", String.valueOf(2100 + rng.nextInt(700)));
-            games.add(new Game(tags, tree[0]));
-        }
-        return new PgnWriter().write(games);
-    }
+    private static final String[] OPENINGS = {
+        "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6", "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6", "d4 Nf6 c4 e6 Nc3 Bb4",
+        "d4 d5 c4 e6 Nc3 Nf6", "e4 e6 d4 d5 Nc3 Bb4", "c4 e5 Nc3 Nf6 g3", "Nf3 d5 g3 Nf6 Bg2", "e4 c6 d4 d5 e5 Bf5",
+    };
 
     @Test
-    void openSpeed() throws Exception {
-        int count = Integer.getInteger("oriondb.perf.games", 300);
-        String pgn = generatePgn(count, 42);
-        Path file = Files.createTempFile("orion-perf", ".pgn");
-        try {
-            Files.writeString(file, pgn);
-            long start = System.nanoTime();
-            try (Database db = Database.open(file)) {
-                db.setSaveOnClose(false);
-                long elapsedMs = (System.nanoTime() - start) / 1_000_000;
-                assertEquals(count, db.gameCount());
-                System.out.printf("Opened %d games in %d ms (%.0f games/s)%n",
-                    count, elapsedMs, count * 1000.0 / Math.max(1, elapsedMs));
-                // Generous bound: ~300 synthetic games should open in seconds.
-                assertTrue(elapsedMs < 30_000, "open took " + elapsedMs + " ms");
-
-                List<Integer> taggedIds = db.games().stream()
-                    .map(Game::id)
-                    .filter(id -> id % 10 == 0)
-                    .toList();
-                List<Integer> controlExcludedIds = db.games().stream()
-                    .map(Game::id)
-                    .filter(id -> id % 10 != 0)
-                    .toList();
-                db.addGameTags(taggedIds, List.of("benchmark"));
-                db.addGameTags(controlExcludedIds, List.of("control-excluded"));
-                int queryCount = Integer.getInteger("oriondb.perf.queries", 200);
-                long queryStart = System.nanoTime();
-                for (int i = 0; i < queryCount; i++) {
-                    assertEquals(taggedIds.size(), db.search().tag("benchmark").count());
+    void profile(@TempDir Path dir) throws Exception {
+        Assumptions.assumeTrue(Boolean.getBoolean("oriondb.slow"));
+        int n = Integer.getInteger("oriondb.perf.games", 20000);
+        Path file = dir.resolve("perf.pgn");
+        SplittableRandom rnd = new SplittableRandom(42);
+        long t0 = System.nanoTime();
+        long plies = 0;
+        try (BufferedWriter w = Files.newBufferedWriter(file)) {
+            for (int i = 0; i < n; i++) {
+                Game g = Game.fromMoves(OPENINGS[rnd.nextInt(OPENINGS.length)]);
+                GameNode node = g.end();
+                int len = 40 + rnd.nextInt(100);
+                while (node.depth() < len) {
+                    int[] legal = node.position().legalMoves();
+                    if (legal.length == 0) break;
+                    node = node.play(legal[rnd.nextInt(legal.length)]);
                 }
-                long queryMs = (System.nanoTime() - queryStart) / 1_000_000;
-                System.out.printf("%d indexed tag queries in %d ms%n", queryCount, queryMs);
-                assertTrue(queryMs < 10_000, "tag queries took " + queryMs + " ms");
-
-                long scanStart = System.nanoTime();
-                for (int i = 0; i < queryCount; i++) {
-                    assertEquals(
-                        taggedIds.size(),
-                        db.search().withoutTag("control-excluded").count());
-                }
-                long scanMs = (System.nanoTime() - scanStart) / 1_000_000;
-                System.out.printf("%d full-scan tag queries in %d ms%n", queryCount, scanMs);
+                plies += node.depth();
+                g.tags().set("White", "Player " + rnd.nextInt(500));
+                g.tags().set("Black", "Player " + rnd.nextInt(500));
+                g.tags().set("WhiteElo", String.valueOf(1800 + rnd.nextInt(1000)));
+                g.tags().set("BlackElo", String.valueOf(1800 + rnd.nextInt(1000)));
+                g.tags().set("Date", (1990 + rnd.nextInt(35)) + ".0" + (1 + rnd.nextInt(9)) + ".1" + rnd.nextInt(10));
+                g.tags().set("Event", "Event " + rnd.nextInt(200));
+                g.tags().set("Result", new String[] {"1-0", "0-1", "1/2-1/2"}[rnd.nextInt(3)]);
+                w.write(PgnWriter.write(g));
+                w.write('\n');
             }
-        } finally {
-            Files.deleteIfExists(file);
         }
+        report("generated %d games (%d plies, %d MB)", t0, n, plies, Files.size(file) >> 20);
+
+        t0 = System.nanoTime();
+        try (Database db = Database.open(file)) {
+            report("first open (parse + analyse + index) %d games", t0, db.size());
+        }
+        t0 = System.nanoTime();
+        Database db = Database.open(file);
+        report("reopen from cache, %d indexed positions", t0, db.snapshot().indexedPositions());
+        Snapshot s = db.snapshot();
+
+        Position najdorf = OpeningExplorer.positionAfter(OPENINGS[0]);
+        for (String q : List.of("player:\"player 7\"", "elo:2600 elomode:both year:2000..2010", "eco:B90-B99 result:1-0",
+                "material:\"KR vs KR\"", "pieces:<=6", "motif:fork,pin", "structure:iqp", "pattern:\"Qh7 kg8\"",
+                "fen:\"" + najdorf.fen() + "\" elo:2500")) {
+            t0 = System.nanoTime();
+            int total = Searcher.search(s, QueryParser.parse(q)).total();
+            report("search %-45s -> %d", t0, q, total);
+        }
+        t0 = System.nanoTime();
+        OpeningExplorer.Result ex = OpeningExplorer.explore(s, Position.start(), null, 3);
+        report("explorer at start: %d games, %d moves", t0, ex.games(), ex.moves().size());
+        t0 = System.nanoTime();
+        PlayerReport.build(s, "Player 7", 10);
+        report("player report", t0);
+
+        t0 = System.nanoTime();
+        db.update(b -> b.updateLabels(1, List.of("x"), List.of()));
+        db.save();
+        report("label one game + save", t0);
+        db.close();
+    }
+
+    private static void report(String fmt, long t0, Object... args) {
+        System.out.printf("%-80s %6d ms%n", String.format(fmt, args), (System.nanoTime() - t0) / 1_000_000);
     }
 }

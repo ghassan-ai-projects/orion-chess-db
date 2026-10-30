@@ -64,3 +64,7 @@ build/
 *.pgn.bak
 *.pgn.lock
 !examples/famous-games.pgn
+
+# Parallel build output dirs
+target-*/
+*.oidx

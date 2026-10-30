@@ -1,132 +1,99 @@
 package com.oriondb.analysis;
 
-import com.oriondb.chess.Board;
 import com.oriondb.chess.Piece;
+import com.oriondb.chess.Position;
 
 /**
- * Material signatures packed into an int: 16 bits per side,
- * P(4) N(3) B(3) R(3) Q(3), white in the low half.
- *
- * The human notation is "KRP vs KR" (white first, pieces in Q,R,B,N,P
- * order after the King).
+ * Material signatures packed into a long: per color 4 bits each for
+ * Q, R, B, N, P counts (white in bits 0-19, black in bits 20-39).
+ * Written as "KRP vs KR" (white first).
  */
 public final class Material {
+    private static final int[] ORDER = {Piece.QUEEN, Piece.ROOK, Piece.BISHOP, Piece.KNIGHT, Piece.PAWN};
 
     private Material() {}
 
-    public static int key(Board board) {
-        return key(board.pieceCounts());
-    }
-
-    /** From {@link Board#pieceCounts()}. */
-    public static int key(int[] counts) {
-        int white = side(
-            counts[Piece.WHITE_PAWN], counts[Piece.WHITE_KNIGHT], counts[Piece.WHITE_BISHOP],
-            counts[Piece.WHITE_ROOK], counts[Piece.WHITE_QUEEN]);
-        int black = side(
-            counts[Piece.BLACK_PAWN], counts[Piece.BLACK_KNIGHT], counts[Piece.BLACK_BISHOP],
-            counts[Piece.BLACK_ROOK], counts[Piece.BLACK_QUEEN]);
-        return white | (black << 16);
-    }
-
-    private static int side(int pawns, int knights, int bishops, int rooks, int queens) {
-        return clamp(pawns, 15) | (clamp(knights, 7) << 4) | (clamp(bishops, 7) << 7)
-            | (clamp(rooks, 7) << 10) | (clamp(queens, 7) << 13);
-    }
-
-    private static int clamp(int v, int max) {
-        return Math.min(v, max);
-    }
-
-    /** Swap the two sides of a key. */
-    public static int flip(int key) {
-        return ((key >>> 16) & 0xFFFF) | ((key & 0xFFFF) << 16);
-    }
-
-    public static int pawns(int key, boolean white) {
-        return (sideBits(key, white)) & 15;
-    }
-
-    public static int knights(int key, boolean white) {
-        return (sideBits(key, white) >> 4) & 7;
-    }
-
-    public static int bishops(int key, boolean white) {
-        return (sideBits(key, white) >> 7) & 7;
-    }
-
-    public static int rooks(int key, boolean white) {
-        return (sideBits(key, white) >> 10) & 7;
-    }
-
-    public static int queens(int key, boolean white) {
-        return (sideBits(key, white) >> 13) & 7;
-    }
-
-    private static int sideBits(int key, boolean white) {
-        return white ? key & 0xFFFF : (key >>> 16) & 0xFFFF;
-    }
-
-    /** Total piece count (both sides, kings included). */
-    public static int pieceCount(int key) {
-        int total = 2;
-        for (boolean white : new boolean[]{true, false}) {
-            total += pawns(key, white) + knights(key, white) + bishops(key, white)
-                + rooks(key, white) + queens(key, white);
+    public static long signature(Position pos) {
+        long key = 0;
+        for (int color = 0; color < 2; color++) {
+            for (int i = 0; i < ORDER.length; i++) {
+                long n = Math.min(15, pos.count(color, ORDER[i]));
+                key |= n << (color * 20 + i * 4);
+            }
         }
-        return total;
+        return key;
     }
 
-    /** "KRP vs KR" style rendering, white side first. */
-    public static String toString(int key) {
-        return sideString(key, true) + " vs " + sideString(key, false);
+    /** Count of one piece type in a signature. */
+    public static int count(long signature, int color, int type) {
+        for (int i = 0; i < ORDER.length; i++) {
+            if (ORDER[i] == type) return (int) ((signature >>> (color * 20 + i * 4)) & 15);
+        }
+        return type == Piece.KING ? 1 : 0;
     }
 
-    private static String sideString(int key, boolean white) {
+    /** The same material with colors swapped. */
+    public static long mirror(long signature) {
+        return ((signature & 0xFFFFFL) << 20) | ((signature >>> 20) & 0xFFFFFL);
+    }
+
+    /** Total number of pieces including kings. */
+    public static int pieceCount(long signature) {
+        int n = 2;
+        for (int shift = 0; shift < 40; shift += 4) n += (int) ((signature >>> shift) & 15);
+        return n;
+    }
+
+    /** Material balance in pawns, white minus black (Q9 R5 B3 N3 P1). */
+    public static int balance(long signature) {
+        int b = 0;
+        for (int type = Piece.PAWN; type <= Piece.QUEEN; type++) {
+            b += Piece.value(type) * (count(signature, Piece.WHITE, type) - count(signature, Piece.BLACK, type));
+        }
+        return b;
+    }
+
+    public static String format(long signature) {
+        return side(signature, Piece.WHITE) + " vs " + side(signature, Piece.BLACK);
+    }
+
+    private static String side(long signature, int color) {
         StringBuilder sb = new StringBuilder("K");
-        append(sb, 'Q', queens(key, white));
-        append(sb, 'R', rooks(key, white));
-        append(sb, 'B', bishops(key, white));
-        append(sb, 'N', knights(key, white));
-        append(sb, 'P', pawns(key, white));
+        for (int type : ORDER) {
+            sb.append(String.valueOf(Piece.typeChar(type)).repeat(count(signature, color, type)));
+        }
         return sb.toString();
     }
 
-    private static void append(StringBuilder sb, char c, int count) {
-        for (int i = 0; i < count; i++) sb.append(c);
-    }
-
     /**
-     * Parse "KRP vs KR", "KRP-KR", "KRPvKR", or "KRPPvsKRP" (case-insensitive,
-     * kings optional). Returns the packed key.
+     * Parses "KRP vs KR", "KRPvKR", "KRP-KR" or "KRPKR" (second K starts black).
      *
-     * @throws IllegalArgumentException on malformed input
+     * @throws IllegalArgumentException for malformed input
      */
-    public static int parse(String signature) {
-        if (signature == null) throw new IllegalArgumentException("null material signature");
-        String s = signature.toUpperCase().replaceAll("\\s+", "");
-        String[] sides = s.split("VS|V|-", 2);
-        if (sides.length != 2 || sides[0].isEmpty() || sides[1].isEmpty()) {
-            throw new IllegalArgumentException(
-                "Material signature must have two sides, e.g. \"KRP vs KR\": " + signature);
+    public static long parse(String text) {
+        String s = text.replaceAll("\\s+", "").toUpperCase().replace("VS", "V").replace("-", "V");
+        String white, black;
+        int v = s.indexOf('V');
+        if (v >= 0) {
+            white = s.substring(0, v);
+            black = s.substring(v + 1);
+        } else {
+            int k2 = s.indexOf('K', 1);
+            if (!s.startsWith("K") || k2 < 0) throw new IllegalArgumentException("bad material signature '" + text + "'");
+            white = s.substring(0, k2);
+            black = s.substring(k2);
         }
-        return sideFromString(sides[0]) | (sideFromString(sides[1]) << 16);
+        return parseSide(white, Piece.WHITE, text) | parseSide(black, Piece.BLACK, text);
     }
 
-    private static int sideFromString(String s) {
-        int p = 0, n = 0, b = 0, r = 0, q = 0;
-        for (char c : s.toCharArray()) {
-            switch (c) {
-                case 'K': break; // king implied
-                case 'Q': q++; break;
-                case 'R': r++; break;
-                case 'B': b++; break;
-                case 'N': n++; break;
-                case 'P': p++; break;
-                default:
-                    throw new IllegalArgumentException("Unknown piece letter '" + c + "'");
-            }
+    private static long parseSide(String side, int color, String text) {
+        if (!side.startsWith("K")) side = "K" + side;
+        long key = 0;
+        for (char c : side.substring(1).toCharArray()) {
+            int idx = "QRBNP".indexOf(c);
+            if (idx < 0) throw new IllegalArgumentException("bad material signature '" + text + "'");
+            key += 1L << (color * 20 + idx * 4);
         }
-        return side(p, n, b, r, q);
+        return key;
     }
 }
