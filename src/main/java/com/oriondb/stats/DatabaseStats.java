@@ -2,6 +2,7 @@ package com.oriondb.stats;
 
 import com.oriondb.db.GameRecord;
 import com.oriondb.db.Snapshot;
+import com.oriondb.query.PlayerIndex;
 
 import java.util.Comparator;
 import java.util.HashMap;
@@ -53,10 +54,11 @@ public final class DatabaseStats {
             if ((r.flags() & (GameRecord.HAS_COMMENTS | GameRecord.HAS_VARIATIONS | GameRecord.HAS_NAGS)) != 0) annotated++;
             if (r.has(GameRecord.HAS_EVALS)) evals++;
             if (r.has(GameRecord.CHESS960)) c960++;
-            if (!r.white().isBlank()) players.merge(r.white(), 1, Integer::sum);
-            if (!r.black().isBlank()) players.merge(r.black(), 1, Integer::sum);
             if (!r.event().isBlank() && !r.event().equals("?")) events.merge(r.event(), 1, Integer::sum);
             if (r.eco() != null) openings.merge(r.eco() + (r.opening() == null ? "" : " " + PlayerReport.familyOf(r.opening())), 1, Integer::sum);
+        }
+        for (PlayerIndex.Player p : PlayerIndex.of(snap).all().subList(0, Math.min(top, PlayerIndex.of(snap).size()))) {
+            players.put(p.name(), p.games());
         }
         return new Stats(valid + invalid, invalid, snap.indexedPositions(), first, last, ww, dr, bw, un,
             valid == 0 ? 0 : Math.round(10.0 * plies / valid) / 10.0, eloN == 0 ? 0 : (int) (eloSum / eloN),

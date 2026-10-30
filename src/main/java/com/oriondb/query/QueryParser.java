@@ -34,7 +34,8 @@ public final class QueryParser {
           elo:2600 (at least)  elo:2500..2700   elomode:either|both|average
           moves:20..40 (full moves)   plies:<=60
           line:"1. e4 c5 2. Nf3"      mainline starts with these moves
-          fen:"<FEN>"                 reaches this position (any move order)
+          fen:"<FEN>"                 reaches this position (any move order) on the mainline
+          scope:all                   fen: also matches positions inside variations (match ply -1)
           pattern:"Kg1 kg8 Pe5 -pd5 R*7 w"  piece placement reached on the mainline
           material:"KRP vs KR"  material:KRPKR  (colors either way; material!:... exact colors)
           pieces:<=6                  reaches a position with at most N pieces
@@ -104,6 +105,11 @@ public final class QueryParser {
             }
             case "line" -> q.line(v);
             case "fen", "position" -> q.position(Position.fromFen(v));
+            case "scope" -> q.positionInVariations(switch (v.strip().toLowerCase(Locale.ROOT)) {
+                case "all", "variations" -> true;
+                case "mainline" -> false;
+                default -> throw new IllegalArgumentException("scope: is mainline or all");
+            });
             case "pattern" -> q.pattern(PiecePattern.parse(v));
             case "material" -> q.material(Material.parse(v), false);
             case "material!" -> q.material(Material.parse(v), true);

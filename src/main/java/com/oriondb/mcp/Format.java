@@ -55,7 +55,9 @@ final class Format {
             "white_elo", r.whiteElo() > 0 ? r.whiteElo() : null, "black_elo", r.blackElo() > 0 ? r.blackElo() : null,
             "result", r.resultText(), "date", r.dateText(), "event", blankToNull(r.event()),
             "eco", r.eco(), "opening", r.opening(), "plies", r.plyCount(), "labels", r.labels());
-        if (ply >= 0) {
+        if (ply == com.oriondb.query.SearchResult.Match.IN_VARIATION) {
+            o.addProperty("match_move", "in a variation");
+        } else if (ply >= 0) {
             o.addProperty("match_ply", ply);
             String m = matchMove(r, ply);
             if (m != null) o.addProperty("match_move", m);

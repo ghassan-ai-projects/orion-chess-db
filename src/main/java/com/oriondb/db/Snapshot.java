@@ -18,8 +18,11 @@ public final class Snapshot {
     private final Map<Integer, GameRecord> byId;
     private final Positions positions;
     private final long version;
+    private final Map<String, Object> derived;
 
-    Snapshot(Database db, List<GameRecord> records, Map<Integer, GameRecord> byId, Positions positions, long version) {
+    Snapshot(Database db, List<GameRecord> records, Map<Integer, GameRecord> byId, Positions positions, long version,
+             Map<String, Object> derived) {
+        this.derived = derived;
         this.db = db;
         this.records = records;
         this.byId = byId;
@@ -60,6 +63,16 @@ public final class Snapshot {
 
     public int indexedPositions() {
         return positions.indexedPositions();
+    }
+
+    /**
+     * Memoizes a value computed from this version of the data (player index,
+     * statistics, application caches). Shared by every snapshot of the same
+     * version and dropped when the data changes.
+     */
+    @SuppressWarnings("unchecked")
+    public <T> T derived(String key, java.util.function.Supplier<T> compute) {
+        return (T) derived.computeIfAbsent(key, k -> compute.get());
     }
 
     /** Full PGN text of a game as stored. */

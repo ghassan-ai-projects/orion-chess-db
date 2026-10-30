@@ -27,9 +27,13 @@ public final class Searcher {
         Map<Integer, Integer> positionPly = null;
         if (q.position != null) {
             positionPly = new HashMap<>();
-            for (PositionIndex.Hit h : snap.positionHits(q.position)) positionPly.merge(h.gameId(), h.ply(), Math::min);
+            for (PositionIndex.Hit h : snap.positionHits(q.position)) {
+                if (!h.inMainline() && !q.positionInVariations) continue;
+                // Prefer the first mainline ply; -1 only when the position occurs solely in variations.
+                positionPly.merge(h.gameId(), h.ply(), (a, b) -> a < 0 ? b : b < 0 ? a : Math.min(a, b));
+            }
         }
-        Predicate<GameRecord> filter = compile(q);
+        Predicate<GameRecord> filter = compile(snap, q);
         Map<Integer, Integer> byPosition = positionPly;
         List<GameRecord> candidates;
         if (byPosition != null) {
@@ -51,7 +55,8 @@ public final class Searcher {
             matches.addAll(found);
         } else {
             for (GameRecord r : candidates) {
-                matches.add(new SearchResult.Match(r, byPosition == null ? -1 : byPosition.get(r.id())));
+                int ply = byPosition == null ? SearchResult.Match.NONE : byPosition.get(r.id());
+                matches.add(new SearchResult.Match(r, ply == PositionIndex.Hit.VARIATION ? SearchResult.Match.IN_VARIATION : ply));
             }
         }
         matches.sort(comparator(q));
@@ -107,25 +112,41 @@ public final class Searcher {
 
     // ------------------------------------------------------------ filters
 
-    private static Predicate<GameRecord> compile(Query q) {
+    /**
+     * A player-name query matches every spelling of every player identity it
+     * matches (so "kasparov garry" also finds "Kasparov, Gary" and "Kasparov,G").
+     */
+    /** Name predicate used by player filters, reports and head-to-head (identity-aware). */
+    public static Predicate<String> playerMatcher(Snapshot snap, String query) {
+        return playerNames(PlayerIndex.of(snap), query);
+    }
+
+    private static Predicate<String> playerNames(PlayerIndex players, String query) {
+        java.util.Set<String> spellings = new java.util.HashSet<>();
+        for (PlayerIndex.Player p : players.search(query, Integer.MAX_VALUE)) spellings.addAll(p.spellings());
+        return spellings::contains;
+    }
+
+    private static Predicate<GameRecord> compile(Snapshot snap, Query q) {
+        PlayerIndex players = q.white != null || q.black != null || q.player != null ? PlayerIndex.of(snap) : null;
         List<Predicate<GameRecord>> fs = new ArrayList<>();
         fs.add(GameRecord::isValid);
         if (q.ids != null) fs.add(r -> q.ids.contains(r.id()));
         if (q.white != null) {
-            Names.Matcher m = new Names.Matcher(q.white);
-            fs.add(r -> m.matches(r.white()));
+            java.util.function.Predicate<String> m = playerNames(players, q.white);
+            fs.add(r -> m.test(r.white()));
         }
         if (q.black != null) {
-            Names.Matcher m = new Names.Matcher(q.black);
-            fs.add(r -> m.matches(r.black()));
+            java.util.function.Predicate<String> m = playerNames(players, q.black);
+            fs.add(r -> m.test(r.black()));
         }
         if (q.player != null) {
-            Names.Matcher m = new Names.Matcher(q.player);
+            java.util.function.Predicate<String> m = playerNames(players, q.player);
             Query.Color color = q.playerColor;
             Query.Outcome outcome = q.outcome;
             fs.add(r -> {
-                boolean asWhite = color != Query.Color.BLACK && m.matches(r.white());
-                boolean asBlack = color != Query.Color.WHITE && m.matches(r.black());
+                boolean asWhite = color != Query.Color.BLACK && m.test(r.white());
+                boolean asBlack = color != Query.Color.WHITE && m.test(r.black());
                 if (!asWhite && !asBlack) return false;
                 if (outcome == null) return true;
                 return (asWhite && outcomeOf(r, 0) == outcome) || (asBlack && outcomeOf(r, 1) == outcome);

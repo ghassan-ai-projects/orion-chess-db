@@ -14,8 +14,17 @@ import java.util.stream.IntStream;
  * About 14 bytes per indexed position; immutable once built.
  */
 public final class PositionIndex {
-    /** A game reaching the position after {@code ply} half-moves. */
-    public record Hit(int gameId, int ply) {}
+    /**
+     * A game reaching the position after {@code ply} half-moves of its mainline,
+     * or ({@code ply == -1}) only inside one of its variations.
+     */
+    public record Hit(int gameId, int ply) {
+        public static final int VARIATION = -1;
+
+        public boolean inMainline() {
+            return ply >= 0;
+        }
+    }
 
     private static final PositionIndex EMPTY = new PositionIndex(new long[0], new int[0], new short[0]);
 
@@ -33,11 +42,15 @@ public final class PositionIndex {
         return EMPTY;
     }
 
-    /** Indexes every position (start included) of each valid game's mainline. Runs in parallel. */
+    /**
+     * Indexes every position (start included) of each valid game's mainline, plus
+     * positions that occur only in its variations (ply -1). Runs in parallel.
+     */
     public static PositionIndex build(List<GameRecord> records) {
         List<GameRecord> valid = records.stream().filter(GameRecord::isValid).toList();
         int[] offsets = new int[valid.size() + 1];
-        for (int i = 0; i < valid.size(); i++) offsets[i + 1] = offsets[i] + Math.min(valid.get(i).plyCount(), Short.MAX_VALUE - 1) + 1;
+        for (int i = 0; i < valid.size(); i++) offsets[i + 1] = offsets[i] + Math.min(valid.get(i).plyCount(), Short.MAX_VALUE - 1) + 1
+            + valid.get(i).variationHashes().length;
         int total = offsets[valid.size()];
         long[] h = new long[total];
         int[] id = new int[total];
@@ -45,13 +58,19 @@ public final class PositionIndex {
         IntStream.range(0, valid.size()).parallel().forEach(i -> {
             GameRecord r = valid.get(i);
             int at = offsets[i];
-            int n = offsets[i + 1] - at;
+            long[] variations = r.variationHashes();
+            int n = offsets[i + 1] - at - variations.length;
             Position p = r.startPosition();
             for (int k = 0; k < n; k++) {
                 if (k > 0) p = p.play(r.move(k - 1));
                 h[at + k] = p.hash();
                 id[at + k] = r.id();
                 ply[at + k] = (short) k;
+            }
+            for (int k = 0; k < variations.length; k++) {
+                h[at + n + k] = variations[k];
+                id[at + n + k] = r.id();
+                ply[at + n + k] = (short) Hit.VARIATION;
             }
         });
         sort(h, id, ply);
@@ -67,6 +86,7 @@ public final class PositionIndex {
             p = p.play(r.move(k));
             if (p.hash() == hash) hits.add(new Hit(r.id(), k + 1));
         }
+        if (r.inVariations(hash)) hits.add(new Hit(r.id(), Hit.VARIATION));
         return hits;
     }
 

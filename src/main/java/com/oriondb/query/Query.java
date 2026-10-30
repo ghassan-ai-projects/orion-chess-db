@@ -36,6 +36,7 @@ public final class Query {
     int minPly, maxPly;
     short[] line;
     Position position;
+    boolean positionInVariations;
     PiecePattern pattern;
     long material = -1;
     boolean materialExactColors;
@@ -117,6 +118,9 @@ public final class Query {
 
     /** Games whose mainline reaches this position, in any move order. */
     public Query position(Position p) { position = p; return this; }
+    /** Also match {@link #position} when it occurs only inside a game's variations (reported ply -1). */
+    public Query positionInVariations(boolean b) { positionInVariations = b; return this; }
+    /** Piece pattern reached on the mainline. */
     public Query pattern(PiecePattern p) { pattern = p; return this; }
 
     /** Material signature reached (either color assignment unless {@code exactColors}). */

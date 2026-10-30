@@ -82,6 +82,50 @@ Each layer depends only on the layers below it.
   drops only the rest of that variation, with a warning.
 - Per-game encoding detection: UTF-8, falling back to Windows-1252.
 
+## Validation on real data
+
+24,367 real games (the January 2024 Lichess broadcast archive, plus the
+pgnmentor.com Carlsen and Kasparov collections):
+
+- All 24,367 imported with no invalid games, in 3.6 s.
+- 80 duplicates were skipped.
+- The one corrupt record in the Lichess export (two games' tags interleaved)
+  was kept with a warning.
+- Every game survives a write and re-parse unchanged: 2.05 M move nodes,
+  including 9.6k games with `[%clk]`/`[%eval]` comments.
+
+Real names motivated the player identity model. In these collections Carlsen
+appears as `Carlsen,M` 7,809 times and as `Carlsen,Magnus` 9 times. Kasparov
+appears as `Kasparov, Gary`, `Kasparov,G` and `Kasparov, Garry`, while
+`Kasparov,Georgy` is a different player.
+
+## Players
+
+`query.PlayerIndex` groups spellings by surname and first initial, then splits
+groups whose full given names differ in their first three letters
+("Gary"/"Garry" stay together; "Garry"/"Georgy" split). Abbreviated spellings
+join the most frequent full-name identity.
+
+Player filters, reports and head-to-head expand a name query to every
+spelling of the matching identities. An identity that has full-name spellings
+matches only through those, so "kasparov georgy" does not pick up Garry's
+games via `Kasparov,G`. The index is memoized per data version.
+
+## Variations
+
+Positions that occur only inside variations are stored per game and indexed
+with ply -1. `fen:` searches the mainline by default; `scope:all` (or
+`Query.positionInVariations`) includes variations, and such matches are
+reported as "in a variation". The opening explorer counts mainline
+continuations only.
+
+## Change events
+
+`DatabaseListener.committed(Change)` receives the net added, updated and
+deleted ids of each batch, so a game added and deleted in the same batch never
+appears. `saved(version)` fires after each save. Callbacks run after the lock
+is released; a failing listener is logged and isolated.
+
 ## Scale (Apple Silicon laptop, synthetic random games, `DatabasePerfTest`)
 
 | games | positions | first open | reopen (cache) | typical query | pattern scan |

@@ -270,6 +270,82 @@ class DatabaseTest {
     }
 
     @Test
+    void variationPositionsAndPlayerIdentities(@TempDir Path dir) throws Exception {
+        String pgn = """
+            [White "Carlsen,M"]
+            [Black "Kasparov, Garry"]
+            [Result "*"]
+
+            1. e4 e5 (1... c5 2. Nf3 d6 3. d4) 2. Nf3 *
+
+            [White "Carlsen, Magnus"]
+            [Black "Kasparov,G"]
+            [Result "*"]
+
+            1. d4 d5 *
+
+            [White "Carlsen,H"]
+            [Black "Kasparov,Georgy"]
+            [Result "*"]
+
+            1. c4 *
+            """;
+        try (Database db = Database.open(write(dir, "v.pgn", pgn))) {
+            Snapshot s = db.snapshot();
+            var sicilian = OpeningExplorer.positionAfter("e4 c5 Nf3 d6 d4");
+            assertEquals(0, Searcher.search(s, new Query().position(sicilian)).total(), "mainline only by default");
+            SearchResult r = Searcher.search(s, QueryParser.parse("fen:\"" + sicilian.fen() + "\" scope:all"));
+            assertEquals(1, r.total());
+            assertTrue(r.matches().get(0).inVariation());
+            assertEquals(1, OpeningExplorer.explore(s, OpeningExplorer.positionAfter("e4"), null, 1).games(),
+                "explorer counts mainline continuations only");
+            db.update(b -> b.add(Game.fromMoves("e4 c5 Nf3 d6 d4")));
+            assertEquals(2, Searcher.search(db.snapshot(), QueryParser.parse("fen:\"" + sicilian.fen() + "\" scope:all")).total(),
+                "overlay games are searched too");
+
+            assertEquals(Set.of(1, 2), ids(s, "player:\"magnus carlsen\""));
+            assertEquals(Set.of(3), ids(s, "white:\"carlsen h\""));
+            assertEquals(Set.of(1, 2), ids(s, "black:\"kasparov garry\""));
+            assertEquals(Set.of(3), ids(s, "black:\"kasparov georgy\""));
+            var players = com.oriondb.query.PlayerIndex.of(s);
+            assertEquals("Carlsen, Magnus", players.forSpelling("Carlsen,M").name());
+            assertEquals(players.forSpelling("Kasparov,G"), players.forSpelling("Kasparov, Garry"));
+            assertNotEquals(players.forSpelling("Kasparov,Georgy"), players.forSpelling("Kasparov, Garry"));
+            assertSame(players, com.oriondb.query.PlayerIndex.of(s), "memoized per data version");
+        }
+    }
+
+    @Test
+    void listenersSeeNetChanges(@TempDir Path dir) throws Exception {
+        try (Database db = Database.open(write(dir, "db.pgn", GAMES), Database.Options.DEFAULT.withAutoSave(true))) {
+            List<Change> commits = new java.util.ArrayList<>();
+            List<Long> saves = new java.util.ArrayList<>();
+            db.addListener(new DatabaseListener() {
+                @Override public void committed(Change c) { commits.add(c); }
+                @Override public void saved(long v) { saves.add(v); }
+            });
+            db.addListener(new DatabaseListener() {
+                @Override public void committed(Change c) { throw new IllegalStateException("ignored"); }
+            });
+            db.update(b -> {
+                int id = b.add(Game.fromMoves("e4"));
+                b.delete(id);              // added and deleted: invisible
+                b.add(Game.fromMoves("d4"));
+                b.setTag(1, "Annotator", "x");
+                b.delete(2);
+            });
+            assertEquals(1, commits.size());
+            Change c = commits.get(0);
+            assertEquals(Set.of(7), c.added());
+            assertEquals(Set.of(1), c.updated());
+            assertEquals(Set.of(2), c.deleted());
+            assertEquals(List.of(c.version()), saves);
+            assertThrows(DatabaseException.class, () -> db.delete(List.of(999)));
+            assertEquals(1, commits.size(), "failed batches notify nothing");
+        }
+    }
+
+    @Test
     void materialSignatures() {
         long sig = Material.parse("KRP vs KR");
         assertEquals("KRP vs KR", Material.format(sig));

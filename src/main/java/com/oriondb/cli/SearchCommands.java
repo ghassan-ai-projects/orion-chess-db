@@ -80,7 +80,7 @@ final class SearchCommands {
             Snapshot snap = db.snapshot();
             SearchResult res = Searcher.search(snap, q);
             List<SearchResult.Match> matches = res.matches();
-            boolean showMatch = matches.stream().anyMatch(m -> m.ply() >= 0);
+            boolean showMatch = matches.stream().anyMatch(m -> m.ply() >= 0 || m.inVariation());
             String summary = matches.isEmpty()
                 ? "no games match (of " + validCount(db) + ")"
                 : (matches.size() == res.total() ? res.total() + " game" + (res.total() == 1 ? "" : "s")
@@ -113,7 +113,7 @@ final class SearchCommands {
                         GameRecord r = m.record();
                         Object[] cells = {r.id(), Fmt.player(r.white(), r.whiteElo()), Fmt.player(r.black(), r.blackElo()),
                             r.resultText(), r.dateText(), Fmt.orDash(r.eco()), r.plyCount(), Fmt.orDash(r.event()),
-                            m.ply() >= 0 ? Fmt.moveLabel(r, m.ply()) : ""};
+                            m.ply() >= 0 || m.inVariation() ? Fmt.moveLabel(r, m.ply()) : ""};
                         t.row(showMatch ? cells : java.util.Arrays.copyOf(cells, 8));
                     }
                     if (format.equals("tsv")) {
@@ -151,7 +151,7 @@ final class SearchCommands {
         o.put("opening", r.opening());
         o.put("plies", r.plyCount());
         o.put("labels", r.labels());
-        if (m.ply() >= 0) {
+        if (m.ply() >= 0 || m.inVariation()) {
             o.put("matchPly", m.ply());
             o.put("matchMove", Fmt.moveLabel(r, m.ply()));
         }

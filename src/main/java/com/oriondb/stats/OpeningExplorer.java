@@ -39,7 +39,9 @@ public final class OpeningExplorer {
 
     public static Result explore(Snapshot snap, Position pos, Predicate<GameRecord> filter, int samplesPerMove) {
         Map<Integer, Integer> firstPly = new HashMap<>();
-        for (PositionIndex.Hit h : snap.positionHits(pos)) firstPly.merge(h.gameId(), h.ply(), Math::min);
+        for (PositionIndex.Hit h : snap.positionHits(pos)) {
+            if (h.inMainline()) firstPly.merge(h.gameId(), h.ply(), Math::min);
+        }
 
         final class Acc {
             int games, w, d, b, eloSum, eloN, lastYear;

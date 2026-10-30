@@ -22,9 +22,11 @@ format and no lock-in.
 - **Fast at scale.** 100,000 games reopen in under a second. Most queries take
   milliseconds (see [docs/architecture.md](docs/architecture.md)).
 - **Search everything.** Combine any of these:
-  - Players (accent- and order-insensitive), color and outcome
+  - Players: accent- and order-insensitive, aware of name variants ("Magnus
+    Carlsen" finds `Carlsen,M` and `Carlsen, Magnus` but not `Carlsen,H`); also
+    color and outcome
   - Event, site, dates, results, ECO ranges, opening names, Elo (either/both/average) and game length
-  - Opening line, exact position (transposition-aware), and **piece patterns** (`"Kg1 kg8 Pe5 -pd5 R*7"`)
+  - Opening line, exact position (transposition-aware, optionally inside variations), and **piece patterns** (`"Kg1 kg8 Pe5 -pd5 R*7"`)
   - Material signatures (`KRP vs KR`) and piece counts
   - Tactical motifs, pawn structures, labels, comments, annotations and arbitrary tags
 
@@ -121,7 +123,7 @@ spaces. Bare words search players, event, site and opening.
 | openings | `eco:B90` `eco:B9` `eco:B90-B99` `line:"1. e4 c5 2. Nf3"` |
 | ratings | `elo:2600` `elo:2500..2700` `elomode:both` |
 | length | `moves:20..40` `plies:<=60` |
-| positions | `fen:"<FEN>"` `pattern:"Kg1 kg8 R*7 -pd5 .f7 w"` |
+| positions | `fen:"<FEN>"` `scope:all` (also inside variations) `pattern:"Kg1 kg8 R*7 -pd5 .f7 w"` |
 | endgames | `material:"KRP vs KR"` `material!:...` (exact colours) `pieces:<=6` |
 | tactics | `motif:fork,sacrifice` `motifby:black` |
 | structure | `structure:iqp` `structureby:white` |
@@ -168,6 +170,29 @@ The tools cover:
 
 Every mutation is saved crash-safely, and game ids are stable across sessions.
 
+## Embedding in an application
+
+OrionDB is designed as the data layer under an application (desktop, server
+or agent). The guarantees an application can rely on:
+
+- **Threading.** `Database` is thread-safe. Reads go through immutable
+  `Snapshot`s and never block or see half-applied changes. Writes are
+  serialized; each `batch` is atomic.
+- **Identity.** Game ids are stable across restarts, edits and saves (stored
+  in the PGN as `OrionId`). Player identities come from `PlayerIndex`, which
+  groups spelling variants; its `id` is stable for a given set of games.
+- **Change events.** `db.addListener(...)` reports the added, updated and
+  deleted ids of every commit (`Change`) and every save, so views and caches
+  can refresh incrementally.
+- **Caching.** `snapshot.derived(key, supplier)` memoizes any computed value
+  per data version (OrionDB uses it for the player index), which is a cheap
+  place to hang application-level caches.
+- **Processes.** One writer per file (OS lock); any number of read-only
+  openers. Saves refuse to overwrite external edits.
+- **Scope.** Network importers (Lichess, Chess.com), user accounts and UI
+  belong to the application. Feed games in via `importText`, `importFile` or
+  `add`.
+
 ## Library use
 
 ```java
@@ -182,6 +207,11 @@ try (Database db = Database.open(Path.of("mygames.pgn"))) {
     db.replace(id, g);                                     // atomic; id and labels kept
     db.update(b -> b.updateLabels(id, List.of("studied"), List.of()));
     db.save();                                             // crash-safe write of the PGN
+
+    db.addListener(new DatabaseListener() {                // keep app views in sync
+        @Override public void committed(Change c) { refresh(c.added(), c.updated(), c.deleted()); }
+    });
+    List<PlayerIndex.Player> hits = PlayerIndex.of(db.snapshot()).search("carlsen", 10);  // autocomplete
 }
 ```
 

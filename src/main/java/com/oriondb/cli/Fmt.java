@@ -107,6 +107,7 @@ final class Fmt {
 
     /** Label of the move reaching ply {@code ply} of a game's mainline: "16. Qb8+" / "15... Nxd7"; "start" for 0. */
     static String moveLabel(GameRecord r, int ply) {
+        if (ply == com.oriondb.query.SearchResult.Match.IN_VARIATION) return "(variation)";
         if (ply <= 0) return "start";
         if (ply > r.plyCount()) return "ply " + ply;
         Position p = r.startPosition();

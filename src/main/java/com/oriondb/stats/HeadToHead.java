@@ -2,7 +2,6 @@ package com.oriondb.stats;
 
 import com.oriondb.db.GameRecord;
 import com.oriondb.db.Snapshot;
-import com.oriondb.query.Names;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -19,15 +18,16 @@ public final class HeadToHead {
     private HeadToHead() {}
 
     public static Result compare(Snapshot snap, String a, String b) {
-        Names.Matcher ma = new Names.Matcher(a), mb = new Names.Matcher(b);
+        java.util.function.Predicate<String> ma = com.oriondb.query.Searcher.playerMatcher(snap, a),
+            mb = com.oriondb.query.Searcher.playerMatcher(snap, b);
         Tally total = new Tally(), asWhite = new Tally(), asBlack = new Tally();
         Map<Integer, Tally> byYear = new TreeMap<>();
         List<GameRecord> games = new ArrayList<>();
         for (GameRecord r : snap.records()) {
             if (!r.isValid()) continue;
             int aColor;
-            if (ma.matches(r.white()) && mb.matches(r.black())) aColor = 0;
-            else if (ma.matches(r.black()) && mb.matches(r.white())) aColor = 1;
+            if (ma.test(r.white()) && mb.test(r.black())) aColor = 0;
+            else if (ma.test(r.black()) && mb.test(r.white())) aColor = 1;
             else continue;
             games.add(r);
             Double s = PlayerReport.scoreFor(r, aColor);

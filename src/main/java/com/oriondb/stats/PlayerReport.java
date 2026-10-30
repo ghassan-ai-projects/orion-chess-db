@@ -3,6 +3,7 @@ package com.oriondb.stats;
 import com.oriondb.db.GameRecord;
 import com.oriondb.db.Snapshot;
 import com.oriondb.query.Names;
+import com.oriondb.query.PlayerIndex;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -30,9 +31,17 @@ public final class PlayerReport {
 
     private PlayerReport() {}
 
-    /** Builds a report for every game whose White or Black name matches {@code name} (token match). */
+    /** Report for every game whose White or Black name matches {@code name} (see {@link Names.Matcher#person}). */
     public static Report build(Snapshot snap, String name, int top) {
-        Names.Matcher m = new Names.Matcher(name);
+        return build(snap, name, com.oriondb.query.Searcher.playerMatcher(snap, name), top);
+    }
+
+    /** Report for exactly the spellings of one {@link PlayerIndex} identity. */
+    public static Report build(Snapshot snap, PlayerIndex.Player player, int top) {
+        return build(snap, player.name(), player.spellings()::contains, top);
+    }
+
+    private static Report build(Snapshot snap, String name, java.util.function.Predicate<String> m, int top) {
         Map<String, Integer> names = new LinkedHashMap<>();
         Tally total = new Tally(), white = new Tally(), black = new Tally();
         Map<Integer, Tally> byYear = new TreeMap<>();
@@ -45,7 +54,7 @@ public final class PlayerReport {
 
         for (GameRecord r : snap.records()) {
             if (!r.isValid()) continue;
-            boolean asWhite = m.matches(r.white()), asBlack = !asWhite && m.matches(r.black());
+            boolean asWhite = m.test(r.white()), asBlack = !asWhite && m.test(r.black());
             if (!asWhite && !asBlack) continue;
             int color = asWhite ? 0 : 1;
             String self = asWhite ? r.white() : r.black();
@@ -85,7 +94,7 @@ public final class PlayerReport {
             .sorted(Comparator.comparingInt(GameRecord::date).reversed().thenComparing(Comparator.comparingInt(GameRecord::id).reversed()))
             .limit(top)
             .map(r -> {
-                boolean w = m.matches(r.white());
+                boolean w = m.test(r.white());
                 return new GameRef(r.id(), w ? r.black() : r.white(), w ? r.blackElo() : r.whiteElo(),
                     w ? "white" : "black", r.resultText(), r.dateText());
             }).toList();

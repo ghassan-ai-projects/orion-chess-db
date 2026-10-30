@@ -32,6 +32,7 @@ public final class GameRecord {
     final String startFen;        // null for the standard start
     final short[] moves;          // packed mainline
     final long[] materials;       // distinct material signatures reached, sorted
+    final long[] variationHashes; // positions reached only inside variations, sorted
     final int motifMask;
     final int[] motifs;           // (ply << 8) | motif ordinal
     final int pawnMask;
@@ -42,7 +43,7 @@ public final class GameRecord {
 
     GameRecord(int id, String[] tags, int date, byte result, short whiteElo, short blackElo,
                String eco, String opening, String bookEco, String bookOpening, int flags, String startFen,
-               short[] moves, long[] materials, int motifMask, int[] motifs, int pawnMask,
+               short[] moves, long[] materials, long[] variationHashes, int motifMask, int[] motifs, int pawnMask,
                String[] labels, String comments, String error, Source source) {
         this.id = id;
         this.tags = tags;
@@ -63,6 +64,7 @@ public final class GameRecord {
         this.startFen = startFen;
         this.moves = moves;
         this.materials = materials;
+        this.variationHashes = variationHashes;
         this.motifMask = motifMask;
         this.motifs = motifs;
         this.pawnMask = pawnMask;
@@ -111,6 +113,16 @@ public final class GameRecord {
         long mirrored = com.oriondb.analysis.Material.mirror(signature);
         for (long m : materials) if (m == signature || (eitherColor && m == mirrored)) return true;
         return false;
+    }
+
+    /** Whether a position (by hash) occurs in this game's variations but not its mainline. */
+    public boolean inVariations(long hash) {
+        return java.util.Arrays.binarySearch(variationHashes, hash) >= 0;
+    }
+
+    /** Hashes of positions that occur only inside variations. */
+    public long[] variationHashes() {
+        return variationHashes.clone();
     }
 
     /** Fewest pieces (kings included) on the board at any point of the mainline. */
@@ -200,7 +212,7 @@ public final class GameRecord {
 
     GameRecord withId(int newId, Source newSource) {
         return new GameRecord(newId, tags, date, result, whiteElo, blackElo, eco, opening, bookEco, bookOpening,
-            flags, startFen, moves, materials, motifMask, motifs, pawnMask, labels, comments, error, newSource);
+            flags, startFen, moves, materials, variationHashes, motifMask, motifs, pawnMask, labels, comments, error, newSource);
     }
 
     GameRecord withSource(Source newSource) {
@@ -209,7 +221,7 @@ public final class GameRecord {
 
     GameRecord withLabels(String[] newLabels, Source newSource) {
         return new GameRecord(id, tags, date, result, whiteElo, blackElo, eco, opening, bookEco, bookOpening,
-            flags, startFen, moves, materials, motifMask, motifs, pawnMask, newLabels, comments, error, newSource);
+            flags, startFen, moves, materials, variationHashes, motifMask, motifs, pawnMask, newLabels, comments, error, newSource);
     }
 
     /** Same game with different header tags (moves and analysis unchanged). */

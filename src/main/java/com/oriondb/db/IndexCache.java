@@ -25,7 +25,7 @@ import java.util.Map;
 final class IndexCache {
     private static final long MAGIC = 0x4F52494F4E494458L; // "ORIONIDX"
     /** Bump whenever record contents or analysis (motifs, structures, ECO) change. */
-    private static final int VERSION = 4;
+    private static final int VERSION = 5;
 
     private IndexCache() {}
 
@@ -101,6 +101,8 @@ final class IndexCache {
             for (short m : r.moves) out.writeShort(m);
             out.writeInt(r.materials.length);
             for (long m : r.materials) out.writeLong(m);
+            out.writeInt(r.variationHashes.length);
+            for (long h : r.variationHashes) out.writeLong(h);
             out.writeInt(r.motifMask);
             out.writeInt(r.motifs.length);
             for (int m : r.motifs) out.writeInt(m);
@@ -152,6 +154,8 @@ final class IndexCache {
             for (int i = 0; i < moves.length; i++) moves[i] = in.readShort();
             long[] materials = new long[in.readInt()];
             for (int i = 0; i < materials.length; i++) materials[i] = in.readLong();
+            long[] variationHashes = new long[in.readInt()];
+            for (int i = 0; i < variationHashes.length; i++) variationHashes[i] = in.readLong();
             int motifMask = in.readInt();
             int[] motifs = new int[in.readInt()];
             for (int i = 0; i < motifs.length; i++) motifs[i] = in.readInt();
@@ -161,7 +165,7 @@ final class IndexCache {
             String comments = str(), error = str();
             Source source = new Source.FileSpan(in.readLong(), in.readInt(), in.readBoolean());
             return RecordBuilder.assemble(id, tags, bookEco, bookOpening, flags, startFen, moves, materials,
-                motifMask, motifs, pawnMask, labels, comments, error, source);
+                variationHashes, motifMask, motifs, pawnMask, labels, comments, error, source);
         }
 
         String str() throws IOException {

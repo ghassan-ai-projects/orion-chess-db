@@ -36,6 +36,7 @@ public final class Batch {
     private final Database db;
     private final ArrayList<GameRecord> records;
     private final Map<Integer, GameRecord> byId;
+    private final Map<Integer, GameRecord> original;
     private Map<Integer, Integer> slotOf;
     private int nextId;
     private final Set<Integer> removed = new HashSet<>();
@@ -47,6 +48,7 @@ public final class Batch {
         this.db = db;
         this.records = new ArrayList<>(records);
         this.byId = new HashMap<>(byId);
+        this.original = byId;
         this.nextId = nextId;
     }
 
@@ -273,6 +275,14 @@ public final class Batch {
             for (int i = 0; i < records.size(); i++) if (records.get(i) != null) slotOf.put(records.get(i).id, i);
         }
         return slotOf;
+    }
+
+    /** The net effect of this batch relative to the state it started from. */
+    Change change(long version) {
+        Set<Integer> add = new java.util.TreeSet<>(), upd = new java.util.TreeSet<>(), del = new java.util.TreeSet<>();
+        for (int id : added.keySet()) (original.containsKey(id) ? upd : add).add(id);
+        for (int id : removed) if (original.containsKey(id) && !byId.containsKey(id)) del.add(id);
+        return new Change(version, Set.copyOf(add), Set.copyOf(upd), Set.copyOf(del));
     }
 
     boolean hasChanges() {

@@ -51,6 +51,15 @@ final class RecordBuilder {
             positions[i + 1] = n.position();
         }
 
+        java.util.HashSet<Long> mainHashes = new java.util.HashSet<>();
+        for (Position p : positions) mainHashes.add(p.hash());
+        TreeSet<Long> varHashes = new TreeSet<>(Long::compare);
+        for (GameNode n : game.allNodes()) {
+            long h = n.position().hash();
+            if (!mainHashes.contains(h)) varHashes.add(h);
+        }
+        long[] variationHashes = varHashes.stream().mapToLong(Long::longValue).toArray();
+
         TreeSet<Long> mats = new TreeSet<>();
         for (Position p : positions) mats.add(Material.signature(p));
         long[] materials = mats.stream().mapToLong(Long::longValue).toArray();
@@ -98,23 +107,23 @@ final class RecordBuilder {
         String commentText = comments.isEmpty() ? null : comments.toString().strip().toLowerCase(Locale.ROOT);
 
         return assemble(id, tags, bookEco, bookOpening, flags, standardStart ? null : positions[0].fen(),
-            packed, materials, motifMask, motifs, pawnMask, labels, commentText, null, source);
+            packed, materials, variationHashes, motifMask, motifs, pawnMask, labels, commentText, null, source);
     }
 
     /** Record for a game that failed to parse: kept verbatim, excluded from search. */
     static GameRecord invalid(int id, Map<String, String> tagMap, String error, Source source) {
         return assemble(id, userTags(tagMap), null, null, GameRecord.INVALID, null, new short[0], new long[0],
-            0, new int[0], 0, labelsFrom(tagMap), null, error, source);
+            new long[0], 0, new int[0], 0, labelsFrom(tagMap), null, error, source);
     }
 
     static GameRecord withHeaders(GameRecord r, String[] tags, Source source) {
         return assemble(r.id, tags, r.bookEco, r.bookOpening, r.flags, r.startFen, r.moves, r.materials,
-            r.motifMask, r.motifs, r.pawnMask, r.labels, r.comments, r.error, source);
+            r.variationHashes, r.motifMask, r.motifs, r.pawnMask, r.labels, r.comments, r.error, source);
     }
 
     /** Rebuilds a record from cached fields (header-derived fields are recomputed). */
     static GameRecord assemble(int id, String[] tags, String bookEco, String bookOpening, int flags,
-                                       String startFen, short[] moves, long[] materials, int motifMask, int[] motifs,
+                                       String startFen, short[] moves, long[] materials, long[] variationHashes, int motifMask, int[] motifs,
                                        int pawnMask, String[] labels, String comments, String error, Source source) {
         String ecoTag = tagIn(tags, "ECO");
         String eco = ecoTag != null && ECO.matcher(ecoTag.strip()).matches() ? ecoTag.strip() : bookEco;
@@ -126,7 +135,7 @@ final class RecordBuilder {
         return new GameRecord(id, tags, parseDate(tagIn(tags, "Date")), parseResult(tagIn(tags, "Result")),
             parseElo(tagIn(tags, "WhiteElo")), parseElo(tagIn(tags, "BlackElo")),
             intern(eco), intern(opening), intern(bookEco), intern(bookOpening), flags, startFen, moves, materials,
-            motifMask, motifs, pawnMask, labels, comments, error, source);
+            variationHashes, motifMask, motifs, pawnMask, labels, comments, error, source);
     }
 
     // ------------------------------------------------------------ tags

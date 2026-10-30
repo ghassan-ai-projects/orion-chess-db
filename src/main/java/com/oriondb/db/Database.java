@@ -58,13 +58,20 @@ public final class Database implements AutoCloseable {
     }
 
     private record State(List<GameRecord> records, Map<Integer, GameRecord> byId, int nextId,
-                         Positions positions, long version, boolean dirty) {}
+                         Positions positions, long version, boolean dirty, Map<String, Object> derived) {
+        State(List<GameRecord> records, Map<Integer, GameRecord> byId, int nextId, Positions positions,
+              long version, boolean dirty) {
+            this(records, byId, nextId, positions, version, dirty, new java.util.concurrent.ConcurrentHashMap<>());
+        }
+    }
 
     private final Storage storage;     // null for in-memory databases
     private final Options options;
     private final Object writeLock = new Object();
     private volatile State state;
     private volatile boolean closed;
+    private final java.util.List<DatabaseListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static final System.Logger LOG = System.getLogger(Database.class.getName());
 
     private Database(Storage storage, Options options) {
         this.storage = storage;
@@ -147,7 +154,7 @@ public final class Database implements AutoCloseable {
     /** A consistent view for searching; cheap to take. */
     public Snapshot snapshot() {
         State s = requireOpen();
-        return new Snapshot(this, s.records, java.util.Collections.unmodifiableMap(s.byId), s.positions, s.version);
+        return new Snapshot(this, s.records, java.util.Collections.unmodifiableMap(s.byId), s.positions, s.version, s.derived);
     }
 
     public int size() {
@@ -199,6 +206,8 @@ public final class Database implements AutoCloseable {
      */
     public <R> R batch(Function<Batch, R> body) {
         R result;
+        Change change = null;
+        long savedVersion = -1;
         synchronized (writeLock) {
             State s = requireOpen();
             if (options.readOnly()) throw new DatabaseException("database is open read-only");
@@ -210,15 +219,42 @@ public final class Database implements AutoCloseable {
                 state = new State(records, b.resultById(), b.nextId(), positions, s.version + 1, true);
                 if (options.autoSave()) {
                     try {
-                        save();
+                        saveLocked();
                     } catch (RuntimeException e) {
                         state = s; // keep memory identical to what is on disk
                         throw e;
                     }
+                    savedVersion = s.version + 1;
                 }
+                change = b.change(s.version + 1);
             }
         }
+        Change committed = change;
+        if (committed != null && !committed.isEmpty()) notify(l -> l.committed(committed));
+        if (savedVersion >= 0) {
+            long v = savedVersion;
+            notify(l -> l.saved(v));
+        }
         return result;
+    }
+
+    /** Registers a listener for commits and saves. */
+    public void addListener(DatabaseListener listener) {
+        listeners.add(java.util.Objects.requireNonNull(listener));
+    }
+
+    public void removeListener(DatabaseListener listener) {
+        listeners.remove(listener);
+    }
+
+    private void notify(Consumer<DatabaseListener> event) {
+        for (DatabaseListener l : listeners) {
+            try {
+                event.accept(l);
+            } catch (RuntimeException e) {
+                LOG.log(System.Logger.Level.WARNING, "database listener failed", e);
+            }
+        }
     }
 
     public void update(Consumer<Batch> body) {
@@ -258,8 +294,19 @@ public final class Database implements AutoCloseable {
      * Fails without writing if another program modified the file.
      */
     public void save() {
+        long version;
         synchronized (writeLock) {
-            State s = requireOpen();
+            if (!requireOpen().dirty) return;
+            version = state.version;
+            saveLocked();
+        }
+        notify(l -> l.saved(version));
+    }
+
+    /** Writes the current state; caller holds the write lock. */
+    private void saveLocked() {
+        {
+            State s = state;
             if (!s.dirty) return;
             if (storage == null) {
                 state = new State(s.records, s.byId, s.nextId, s.positions, s.version, false);

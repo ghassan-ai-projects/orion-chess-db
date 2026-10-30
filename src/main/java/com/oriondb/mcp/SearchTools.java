@@ -90,6 +90,8 @@ final class SearchTools {
             .integer("max_moves", "Maximum game length in full moves.", 0, 10000)
             .str("line", "Mainline starts with these SAN moves, e.g. '1. e4 c5 2. Nf3 d6'.")
             .str("fen", "Mainline reaches this position (any move order; FEN, move counters ignored).")
+            .bool("fen_in_variations", "Also match games where the fen position occurs only inside a variation "
+                + "(such rows report match_move 'in a variation').")
             .str("pattern", "Piece pattern reached on the mainline, e.g. 'Kg1 kg8 Pe5 -pd5 R*7 w': uppercase white, lowercase "
                 + "black, * wildcard file/rank, '-' absent, '.f7' empty square, 'w'/'b' side to move.")
             .str("material", "Material signature reached, e.g. 'KRP vs KR' (colors either way unless material_exact_colors).")
@@ -165,6 +167,7 @@ final class SearchTools {
         }
         if (a.has("line")) q.line(a.str("line"));
         if (a.has("fen")) q.position(Inputs.fen(a.str("fen")));
+        if (a.has("fen_in_variations")) q.positionInVariations(a.bool("fen_in_variations", false));
         if (a.has("pattern")) q.pattern(PiecePattern.parse(a.str("pattern")));
         if (a.has("material")) q.material(Material.parse(a.str("material")), a.bool("material_exact_colors", false));
         if (a.has("max_pieces")) q.maxPieces(a.integer("max_pieces", 32, 2, 32));
