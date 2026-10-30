@@ -87,7 +87,20 @@ class DatabasePerfTest {
         t0 = System.nanoTime();
         db.update(b -> b.updateLabels(1, List.of("x"), List.of()));
         db.save();
-        report("label one game + save", t0);
+        report("label one game + save (journal append)", t0);
+        t0 = System.nanoTime();
+        for (int i = 2; i < 102; i++) {
+            int id = i;
+            db.update(b -> b.setTag(id, "Annotator", "perf"));
+            db.save();
+        }
+        report("100 edits, each saved", t0);
+        t0 = System.nanoTime();
+        Searcher.search(db.snapshot(), QueryParser.parse("(eco:B90-B99 OR eco:C00-C19) -result:draw move:O-O-O"));
+        report("search with OR/NOT + move scan", t0);
+        t0 = System.nanoTime();
+        db.compact();
+        report("compact (full PGN rewrite)", t0);
         db.close();
     }
 

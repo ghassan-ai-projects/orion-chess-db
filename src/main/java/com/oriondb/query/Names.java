@@ -97,17 +97,32 @@ public final class Names {
                 return true;
             }
             PersonName p = PersonName.parse(name);
+            boolean surnameMatched = false, viaInitial = false;
             for (String q : query) {
                 boolean ok = false;
-                for (String s : p.surname()) if (s.startsWith(q)) { ok = true; break; }
+                for (String s : p.surname()) {
+                    if (s.startsWith(q)) {
+                        ok = surnameMatched = true;
+                        break;
+                    }
+                }
                 if (!ok) {
                     for (String g : p.given()) {
-                        if (g.startsWith(q) || (g.length() <= 2 && q.startsWith(g))) { ok = true; break; }
+                        if (g.startsWith(q)) {
+                            ok = true;
+                            break;
+                        }
+                        if (g.length() <= 2 && q.startsWith(g)) {
+                            ok = viaInitial = true;
+                            break;
+                        }
                     }
                 }
                 if (!ok) return false;
             }
-            return true;
+            // An initial only vouches for a given name when the surname matched too:
+            // "magnus carlsen" fits "Carlsen,M", but "nakamura" alone must not fit "Lokesh, N.".
+            return surnameMatched || !viaInitial;
         }
 
         private static boolean anyPrefix(String[] name, String q) {

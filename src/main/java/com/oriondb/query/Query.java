@@ -16,14 +16,19 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Search criteria, all AND-combined. Built fluently ({@code new Query().player("Carlsen").minElo(2700)})
+ * Search criteria. A query's own criteria are AND-combined; sub-queries add
+ * boolean structure: every {@link #and} sub-query must match, at least one
+ * {@link #or} sub-query must match (when there are any), and no {@link #not}
+ * sub-query may match. Built fluently
+ * ({@code new Query().player("Carlsen").minElo(2700).or(new Query().eco("B90-B99"), new Query().eco("C00-C19"))})
  * or from text with {@link QueryParser}. Unset criteria match everything.
+ * Sorting and paging are taken from the top-level query only.
  */
 public final class Query {
     public enum EloMode { EITHER, BOTH, AVERAGE }
     public enum Color { ANY, WHITE, BLACK }
     public enum Outcome { WIN, DRAW, LOSS }
-    public enum Sort { ID, DATE, WHITE, BLACK, EVENT, ELO, PLY, ECO }
+    public enum Sort { ID, DATE, WHITE, BLACK, EVENT, ELO, WHITE_ELO, BLACK_ELO, PLY, ECO }
 
     String white, black, player, event, site, round, opening, text, comment;
     Color playerColor = Color.ANY;
@@ -49,6 +54,13 @@ public final class Query {
     Boolean annotated, hasComments, hasVariations, hasEvals, chess960;
     Map<String, String> tagEquals = new LinkedHashMap<>();
     Set<Integer> ids;
+    List<MovePattern> moves = new ArrayList<>();
+    List<MovePattern> sequence;
+    Color moveBy = Color.ANY;
+    int moveFrom, moveTo;          // full-move number range for move:/sequence:, 0 = open
+    Integer balanceMin, balanceMax;
+    final List<Query> allOf = new ArrayList<>(), anyOf = new ArrayList<>(), noneOf = new ArrayList<>();
+    String after;
     Sort sort = Sort.ID;
     boolean descending;
     int offset, limit = 50;
@@ -142,6 +154,38 @@ public final class Query {
     /** Arbitrary tag equals value (case-insensitive); value "*" means the tag is present. */
     public Query tag(String name, String value) { tagEquals.put(name, value); return this; }
     public Query ids(Set<Integer> v) { ids = v == null ? null : Set.copyOf(v); return this; }
+    /** A mainline move fitting this pattern was played (repeatable: all must occur). */
+    public Query move(MovePattern m) { moves.add(m); return this; }
+    /** These moves were played consecutively somewhere on the mainline. */
+    public Query sequence(List<MovePattern> s) { sequence = s == null || s.isEmpty() ? null : List.copyOf(s); return this; }
+    /** Restrict {@link #move}/{@link #sequence} to moves by one side. */
+    public Query moveBy(Color c) { moveBy = c; return this; }
+    /** Restrict {@link #move}/{@link #sequence} to full-move numbers in [from, to] (0 = open end). */
+    public Query moveNumbers(int from, int to) { moveFrom = from; moveTo = to; return this; }
+    /** A position with White's material advantage (pawns; negative = Black ahead) in [min, max] is reached. */
+    public Query balance(Integer min, Integer max) { balanceMin = min; balanceMax = max; return this; }
+
+    /** Every one of these must also match. */
+    public Query and(Query... qs) { allOf.addAll(List.of(qs)); return this; }
+    /** At least one of these must match (each call adds one OR group, ANDed with the rest). */
+    public Query or(Query... qs) {
+        if (qs.length == 1) allOf.add(qs[0]);
+        else allOf.add(new Query().anyOfInternal(qs));
+        return this;
+    }
+    private Query anyOfInternal(Query... qs) { anyOf.addAll(List.of(qs)); return this; }
+    /** None of these may match. */
+    public Query not(Query... qs) { noneOf.addAll(List.of(qs)); return this; }
+    /** A query matching if any of {@code qs} matches. */
+    public static Query anyOf(Query... qs) { return new Query().anyOfInternal(qs); }
+
+    /**
+     * Keyset paging: return results strictly after this cursor (from a previous
+     * {@link SearchResult#nextCursor()}). Unlike offsets, pages stay stable when
+     * games are added or removed between requests. Overrides the offset.
+     */
+    public Query after(String cursor) { after = cursor == null || cursor.isBlank() ? null : cursor; return this; }
+
     public Query sort(Sort s, boolean desc) { sort = s; descending = desc; return this; }
     public Query page(int offset, int limit) { this.offset = Math.max(0, offset); this.limit = limit; return this; }
     /** No pagination: return every match. */

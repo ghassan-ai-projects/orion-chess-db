@@ -25,7 +25,7 @@ import java.util.Map;
 final class IndexCache {
     private static final long MAGIC = 0x4F52494F4E494458L; // "ORIONIDX"
     /** Bump whenever record contents or analysis (motifs, structures, ECO) change. */
-    private static final int VERSION = 5;
+    private static final int VERSION = 6;
 
     private IndexCache() {}
 

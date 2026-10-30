@@ -67,7 +67,8 @@ final class SearchTools {
 
     static Schema searchSchema() {
         return Schema.object()
-            .str("query", "Text query, e.g. 'player:carlsen as:white eco:B90-B99 elo:2700 year:2015..2020 motif:fork sort:-date'. "
+            .str("query", "Text query, e.g. 'player:carlsen as:white (eco:B90-B99 OR eco:C00-C19) -result:draw elo:2700 "
+                + "move:Bxh7+ sort:-date'. Supports OR, NOT/-term and parentheses; structured fields below are ANDed with it. "
                 + "Keys: " + QueryParser.HELP.replaceAll("\\s+", " ").strip())
             .str("white", "White player name (tokens in any order, case/accent-insensitive).")
             .str("black", "Black player name.")
@@ -109,10 +110,19 @@ final class SearchTools {
             .str("comment_contains", "Some comment contains this text (case-insensitive).")
             .stringMap("tag", "PGN tags that must equal these values (case-insensitive), e.g. {\"TimeControl\": \"180+2\"}; value '*' = tag present.", false)
             .ints("ids", "Restrict to these game ids.")
-            .choice("sort", "Sort order (default id).", "id", "date", "white", "black", "event", "elo", "ply", "eco")
+            .strings("moves", "Mainline moves that must all have been played, as SAN patterns: 'Bxh7+' (x capture, + check, "
+                + "# mate), 'e8=Q', 'Q*' (any queen move), 'O-O'. Captures match even without x.")
+            .str("sequence", "Consecutive mainline moves played anywhere in the game, e.g. 'Bxh7+ Kxh7 Ng5+'.")
+            .choice("move_by", "Only count moves/sequences by this side.", "white", "black", "any")
+            .integer("move_from", "Only count moves/sequences from this full-move number on.", 0, 10000)
+            .integer("move_to", "Only count moves/sequences up to this full-move number.", 0, 10000)
+            .integer("min_balance", "Reaches a position where White's material lead (pawns; negative = Black ahead) is at least this.", -60, 60)
+            .integer("max_balance", "Reaches a position where White's material lead is at most this.", -60, 60)
+            .choice("sort", "Sort order (default id).", "id", "date", "white", "black", "event", "elo", "white_elo", "black_elo", "ply", "eco")
             .bool("descending", "Sort descending.")
             .integer("limit", "Rows to return (default 25, max 500).", 1, MAX_LIMIT)
-            .integer("offset", "Rows to skip (paging).", 0, Integer.MAX_VALUE);
+            .integer("offset", "Rows to skip (paging). Prefer 'after' when the database may change between pages.", 0, Integer.MAX_VALUE)
+            .str("after", "Cursor from a previous result's next_cursor: returns the page after it, stable under concurrent edits.");
     }
 
     /** Parses the text query language with a helpful error. */
@@ -186,6 +196,15 @@ final class SearchTools {
             q.tag(e.getKey(), e.getValue());
         }
         if (a.has("ids")) q.ids(new HashSet<>(a.ints("ids")));
+        if (a.has("moves")) for (String m : a.strings("moves")) q.move(com.oriondb.query.MovePattern.parse(m));
+        if (a.has("sequence")) q.sequence(com.oriondb.query.MovePattern.parseList(a.str("sequence")));
+        if (a.has("move_by")) q.moveBy(color(a.str("move_by")));
+        if (a.has("move_from") || a.has("move_to")) q.moveNumbers(a.integer("move_from", 0, 0, 10000), a.integer("move_to", 0, 0, 10000));
+        if (a.has("min_balance") || a.has("max_balance")) {
+            q.balance(a.has("min_balance") ? a.integer("min_balance", 0, -60, 60) : null,
+                a.has("max_balance") ? a.integer("max_balance", 0, -60, 60) : null);
+        }
+        if (a.has("after")) q.after(a.str("after"));
         if (a.has("sort") || a.has("descending")) {
             q.sort(Query.Sort.valueOf(a.str("sort", "id").strip().toUpperCase(Locale.ROOT)), a.bool("descending", false));
         }
@@ -234,9 +253,10 @@ final class SearchTools {
             rows.add(Format.row(m.record(), m.ply()));
             sb.append(Format.rowText(m.record(), m.ply())).append('\n');
         }
-        if (to < res.total()) sb.append("More results: offset=").append(to).append('\n');
+        if (res.nextCursor() != null) sb.append("More results: after=").append(res.nextCursor()).append('\n');
         return ToolResult.of(sb.toString().strip(),
-            Json.obj("total", res.total(), "offset", q.offset(), "count", res.matches().size(), "games", rows));
+            Json.obj("total", res.total(), "offset", q.offset(), "count", res.matches().size(), "games", rows,
+                "next_cursor", res.nextCursor()));
     }
 
     // ------------------------------------------------------------ export

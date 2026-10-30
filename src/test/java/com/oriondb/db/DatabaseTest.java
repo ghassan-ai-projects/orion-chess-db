@@ -346,6 +346,75 @@ class DatabaseTest {
     }
 
     @Test
+    void savesAppendToJournalAndCompactOnClose(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        Path journal = dir.resolve("db.pgn.journal");
+        try (Database db = Database.open(file)) {
+            db.setTag(1, "Annotator", "first");
+            db.save();
+            assertTrue(Files.exists(journal));
+            assertEquals(GAMES, Files.readString(file), "an incremental save leaves the PGN untouched");
+            assertTrue(db.hasJournal());
+            int id = db.add(Game.fromMoves("c4 e5"));
+            db.delete(List.of(2));
+            db.save();
+            // Another process (read-only) sees journaled changes.
+            try (Database ro = Database.open(file, Database.Options.READ_ONLY)) {
+                assertEquals("first", ro.record(1).tag("Annotator"));
+                assertNull(ro.snapshot().find(2));
+                assertEquals(1, Searcher.search(ro.snapshot(), QueryParser.parse("line:\"1. c4 e5\"")).total());
+            }
+            assertEquals(6, id);
+        }
+        assertFalse(Files.exists(journal), "close compacts the journal into the PGN");
+        String pgn = Files.readString(file);
+        assertTrue(pgn.contains("[Annotator \"first\"]"));
+        assertFalse(pgn.contains("[White \"Doe, John\"]\n[Black \"Carlsen"), "deleted game is gone");
+        try (Database db = Database.open(file)) {
+            assertEquals(5, db.size());
+            assertEquals(6, Searcher.ids(db.snapshot(), QueryParser.parse("line:\"1. c4 e5\"")).get(0));
+        }
+    }
+
+    @Test
+    void journalSurvivesCrashAndIgnoresTornTail(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        Path journal = dir.resolve("db.pgn.journal");
+        Database db = Database.open(file, Database.Options.DEFAULT.withCompactOnClose(false));
+        db.setTag(1, "Annotator", "kept");
+        db.save();
+        db.setTag(3, "Annotator", "also kept");
+        db.save();
+        db.close(); // journal stays (compactOnClose off), as after a crash
+        assertTrue(Files.exists(journal));
+        // Simulate a torn write: garbage appended after the last commit.
+        Files.write(journal, new byte[] {0, 0, 0, 40, 1, 2, 3}, java.nio.file.StandardOpenOption.APPEND);
+        try (Database again = Database.open(file, Database.Options.DEFAULT.withCompactOnClose(false))) {
+            assertEquals("kept", again.record(1).tag("Annotator"));
+            assertEquals("also kept", again.record(3).tag("Annotator"));
+            again.setTag(4, "Annotator", "after recovery");
+            again.save();
+        }
+        try (Database last = Database.open(file)) {
+            assertEquals("after recovery", last.record(4).tag("Annotator"));
+            assertEquals("kept", last.record(1).tag("Annotator"));
+        }
+        assertFalse(Files.exists(journal));
+    }
+
+    @Test
+    void journalForAnotherPgnVersionIsRefused(@TempDir Path dir) throws Exception {
+        Path file = write(dir, "db.pgn", GAMES);
+        try (Database db = Database.open(file, Database.Options.DEFAULT.withCompactOnClose(false))) {
+            db.setTag(1, "Annotator", "x");
+            db.save();
+        }
+        Files.writeString(file, GAMES + "\n");
+        DatabaseException e = assertThrows(DatabaseException.class, () -> Database.open(file));
+        assertTrue(e.getMessage().contains("different version"), e.getMessage());
+    }
+
+    @Test
     void materialSignatures() {
         long sig = Material.parse("KRP vs KR");
         assertEquals("KRP vs KR", Material.format(sig));

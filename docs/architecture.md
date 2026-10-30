@@ -34,11 +34,23 @@ Each layer depends only on the layers below it.
   otherwise it is rebuilt. Deleting it is always safe.
 - Each game's record knows its byte span in the PGN file. Full games
   (variations, comments) are read and parsed on demand.
-- Saving writes a temp file, fsyncs, keeps the previous generation as
-  `mygames.pgn.bak` (a hard link when possible), and atomically renames.
-  Unchanged games are copied byte-for-byte, so formatting you did not touch is
-  preserved. If another program changed the file since it was read, the save
-  is refused.
+- **Saves are incremental.** `save()` appends the changed games (their full
+  PGN text, or a deletion) to `mygames.pgn.journal`, then fsyncs.
+  - Frames are length-prefixed and CRC32-checked, and a group only takes
+    effect once its COMMIT frame is written, so each save is atomic.
+  - A torn tail from a crash is ignored, and the next writer truncates it.
+  - The journal header records the PGN size and mtime it applies to. If
+    another program changed the PGN in the meantime, opening fails with an
+    explanation instead of applying edits to the wrong file.
+- **Compaction folds the journal into the PGN.**
+  - It runs on `compact()`, on `close()` by default, and automatically when
+    the journal would exceed max(8 MB, PGN/4).
+  - It writes a temp file, fsyncs, keeps the previous generation as
+    `mygames.pgn.bak` (a hard link when possible), and renames atomically.
+  - Unchanged games are copied byte-for-byte, so formatting you did not touch
+    is preserved. If another program changed the file since it was read, the
+    write is refused.
+  - At 100k games a save costs about 9 ms; compaction about 1 s.
 - `mygames.pgn.lock` holds an OS file lock while a process can write; a second
   writer fails fast. Read-only opens take no lock.
 - Tool-owned tags: `[OrionId "17"]` (stable id) and `[OrionLabels "a,b"]`. They
@@ -56,6 +68,13 @@ Each layer depends only on the layers below it.
   Transposition-aware by construction.
 - Changes after the index was built go to a small overlay that is scanned
   directly; once it passes ~5% of the database the index is rebuilt.
+- Queries are trees: a `Query` holds its own AND-ed criteria plus `and`, `or`
+  and `not` sub-queries. The text language parses `OR`, `NOT`/`-` and
+  parentheses into that tree. Sort keys are precomputed, and keyset cursors
+  (sort key + id) give stable paging.
+- Move criteria (`move:`, `sequence:`) are matched by meaning (piece, squares,
+  capture, check, promotion) during a single replay that also serves piece
+  patterns. They run only on games that survived the cheaper filters.
 - Reads use immutable `Snapshot`s (lock-free). Writes go through `Batch`, which
   works on a copy and swaps it in atomically. If the batch body throws,
   nothing changes.

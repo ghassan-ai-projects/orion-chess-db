@@ -16,7 +16,11 @@ import java.util.Locale;
  */
 public enum PawnFeature {
     ISOLATED_QUEEN_PAWN, HANGING_PAWNS, PASSED_PAWN, CONNECTED_PASSED_PAWNS, DOUBLED_PAWNS,
-    MAROCZY_BIND, CARLSBAD, STONEWALL, OPPOSITE_COLORED_BISHOPS;
+    MAROCZY_BIND, CARLSBAD, STONEWALL, OPPOSITE_COLORED_BISHOPS,
+    /** Any pawn with no friendly pawns on adjacent files. */
+    ISOLATED_PAWN,
+    /** A passed pawn on its sixth rank or beyond. */
+    ADVANCED_PASSED_PAWN;
 
     public static final int MIN_PLIES = 4;
     private static final int FROM_PLY = 10;
@@ -33,7 +37,17 @@ public enum PawnFeature {
 
     public static PawnFeature parse(String s) {
         String k = s.strip().toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
-        if (k.equals("IQP")) return ISOLATED_QUEEN_PAWN;
+        switch (k) { // short names, including OrionDB v2's
+            case "IQP" -> { return ISOLATED_QUEEN_PAWN; }
+            case "ISOLATED" -> { return ISOLATED_PAWN; }
+            case "PASSED", "PASSER" -> { return PASSED_PAWN; }
+            case "DOUBLED" -> { return DOUBLED_PAWNS; }
+            case "ADVANCED_PASSER", "ADVANCED_PASSED" -> { return ADVANCED_PASSED_PAWN; }
+            case "HANGING" -> { return HANGING_PAWNS; }
+            case "CONNECTED_PASSERS" -> { return CONNECTED_PASSED_PAWNS; }
+            case "OCB" -> { return OPPOSITE_COLORED_BISHOPS; }
+            default -> { }
+        }
         for (PawnFeature f : values()) if (f.name().equals(k)) return f;
         throw new IllegalArgumentException("unknown structure '" + s + "'; known: iqp, " + keysList());
     }
@@ -114,6 +128,21 @@ public enum PawnFeature {
             case CARLSBAD -> has(own, 3, r4) && has(own, 4, r3) && (own & fileMask(2)) == 0
                 && has(opp, 2, r6) && has(opp, 3, r5) && (opp & fileMask(4)) == 0;
             case STONEWALL -> has(own, 2, r3) && has(own, 3, r4) && has(own, 4, r3) && has(own, 5, r4);
+            case ISOLATED_PAWN -> {
+                boolean isolated = false;
+                for (int f = 0; f < 8; f++) {
+                    long adjacent = (f > 0 ? fileMask(f - 1) : 0) | (f < 7 ? fileMask(f + 1) : 0);
+                    if ((own & fileMask(f)) != 0 && (own & adjacent) == 0) isolated = true;
+                }
+                yield isolated;
+            }
+            case ADVANCED_PASSED_PAWN -> {
+                boolean advanced = false;
+                for (long t = passers(own, opp, c); t != 0; t &= t - 1) {
+                    if (Square.relativeRank(Long.numberOfTrailingZeros(t), c) >= 5) advanced = true;
+                }
+                yield advanced;
+            }
             case OPPOSITE_COLORED_BISHOPS -> {
                 long wb = p.pieces(Piece.WHITE, Piece.BISHOP), bb = p.pieces(Piece.BLACK, Piece.BISHOP);
                 // Symmetric feature: report it once, for white.

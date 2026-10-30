@@ -135,8 +135,16 @@ abstract class McpHarness {
         return res.getAsJsonObject("structuredContent");
     }
 
+    /**
+     * Everything durably on disk (PGN plus journal), as a separate read-only
+     * process would see it: each game's PGN text, joined.
+     */
     String fileText() throws IOException {
-        return Files.readString(file, StandardCharsets.UTF_8);
+        try (com.oriondb.db.Database ro = com.oriondb.db.Database.open(file, com.oriondb.db.Database.Options.READ_ONLY)) {
+            StringBuilder sb = new StringBuilder();
+            for (com.oriondb.db.GameRecord r : ro.snapshot().records()) sb.append(ro.pgn(r.id())).append("\n\n");
+            return sb.toString();
+        }
     }
 
     /** Id of the single game matching a query. */

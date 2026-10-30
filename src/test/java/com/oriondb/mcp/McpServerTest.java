@@ -61,6 +61,23 @@ class McpServerTest extends McpHarness {
     }
 
     @Test
+    void booleanQueriesMovesAndCursors() {
+        JsonObject or = structured(ok("search_games", Json.write(Json.obj("query", "player:morphy OR player:fischer"))));
+        assertEquals(2, or.get("total").getAsInt());
+        JsonObject not = structured(ok("search_games", Json.write(Json.obj("query", "-player:morphy -player:fischer", "limit", 100))));
+        assertEquals(structured(ok("db_stats", "{}")).get("games").getAsInt() - 2, not.get("total").getAsInt());
+        JsonObject moves = structured(ok("search_games", Json.write(Json.obj("moves", List.of("Rd8#"), "move_by", "white"))));
+        assertEquals(1, moves.get("total").getAsInt());
+        assertTrue(moves.getAsJsonArray("games").get(0).getAsJsonObject().get("match_move").getAsString().contains("Rd8#"));
+
+        JsonObject page1 = structured(ok("search_games", Json.write(Json.obj("sort", "date", "limit", 2))));
+        String cursor = page1.get("next_cursor").getAsString();
+        JsonObject page2 = structured(ok("search_games", Json.write(Json.obj("sort", "date", "limit", 2, "after", cursor))));
+        assertNotEquals(page1.getAsJsonArray("games").get(0), page2.getAsJsonArray("games").get(0));
+        assertTrue(isError(call("search_games", Json.write(Json.obj("after", "garbage!")))));
+    }
+
+    @Test
     void protocolErrors() {
         List<JsonElement> out = session(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"no/such/method\"}",

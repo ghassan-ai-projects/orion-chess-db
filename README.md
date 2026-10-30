@@ -30,8 +30,12 @@ format and no lock-in.
   - Material signatures (`KRP vs KR`) and piece counts
   - Tactical motifs, pawn structures, labels, comments, annotations and arbitrary tags
 
-  Sort and paginate the results. The same filters are available as a fluent
-  API and as a text query language.
+  - Moves played (`move:Bxh7+`), move sequences anywhere in the game, and
+    material balance reached
+
+  Combine them with `OR`, `NOT` and parentheses, sort them, and page with
+  offsets or stable cursors. The same filters are available as a fluent API
+  and as a text query language.
 - **Opening explorer** for any position: games, W/D/L, score, average rating,
   performance, last played and top games per move, with ECO names from the
   embedded lichess book.
@@ -54,7 +58,10 @@ format and no lock-in.
   itself.
 - **Safe writes.**
   - Atomic batches (all-or-nothing)
-  - Crash-safe saves: temp file, fsync, `.bak`, atomic rename
+  - Incremental saves: only changed games are appended to a checksummed
+    journal (about 9 ms per edit at 100k games), and the journal is folded
+    into the PGN on close or when it grows
+  - Crash-safe compaction: temp file, fsync, `.bak`, atomic rename
   - A process lock against concurrent writers
   - Saves are refused if another program changed the file
 
@@ -111,8 +118,10 @@ Needs Stockfish on PATH, or set `ORIONDB_ENGINE=/path/to/engine`.
 
 ### Query language
 
-Terms are `key:value` and are AND-combined. Quote values that contain
-spaces. Bare words search players, event, site and opening.
+Terms are `key:value` and are AND-combined. Use `OR`, `NOT` (or a leading
+`-`) and parentheses for more, e.g.
+`(eco:B90-B99 OR eco:C00-C19) -result:draw elo:2600`. Quote values that
+contain spaces. Bare words search players, event, site and opening.
 
 | Key | Examples |
 |---|---|
@@ -125,11 +134,13 @@ spaces. Bare words search players, event, site and opening.
 | length | `moves:20..40` `plies:<=60` |
 | positions | `fen:"<FEN>"` `scope:all` (also inside variations) `pattern:"Kg1 kg8 R*7 -pd5 .f7 w"` |
 | endgames | `material:"KRP vs KR"` `material!:...` (exact colours) `pieces:<=6` |
-| tactics | `motif:fork,sacrifice` `motifby:black` |
-| structure | `structure:iqp` `structureby:white` |
+| tactics | `motif:fork,sacrifice,castling` `motifby:black` |
+| moves | `move:Bxh7+` `move:Q*#` `move:e8=Q` `sequence:"Bxh7+ Kxh7 Ng5+"` `moveby:white` `movenum:10..25` |
+| material balance | `balance:>=3` `balance:-1..1` (White minus Black, in pawns, reached at some point) |
+| structure | `structure:iqp,isolated,passed,advanced_passer,doubled,hanging_pawns,carlsbad` `structureby:white` |
 | organisation | `label:prep` `anylabel:a,b` `nolabel:done` `id:1,5,9` |
 | annotations | `annotated:yes` `comments:yes` `variations:yes` `evals:yes` `comment:"novelty"` |
-| output | `sort:-date` (`date` `white` `black` `event` `elo` `ply` `eco` `id`) `limit:20` `offset:40` |
+| output | `sort:-date` (`date` `white` `black` `event` `elo` `whiteelo` `blackelo` `ply` `eco` `id`) `limit:20` `offset:40` `after:<cursor>` |
 
 ## The MCP server (for AI agents)
 
@@ -188,7 +199,14 @@ or agent). The guarantees an application can rely on:
   per data version (OrionDB uses it for the player index), which is a cheap
   place to hang application-level caches.
 - **Processes.** One writer per file (OS lock); any number of read-only
-  openers. Saves refuse to overwrite external edits.
+  openers. Read-only openers see journaled saves too. Saves refuse to
+  overwrite external edits.
+- **Durability.** `save()` is cheap (journal append plus fsync), so an app can
+  save after every user action. `compact()` folds the journal into the PGN.
+  This also happens on `close()` by default (`Options.withCompactOnClose`),
+  and automatically once the journal passes a quarter of the PGN size.
+- **Paging.** `SearchResult.nextCursor()` with `Query.after(cursor)` gives
+  pages that stay consistent while games are added or removed.
 - **Scope.** Network importers (Lichess, Chess.com), user accounts and UI
   belong to the application. Feed games in via `importText`, `importFile` or
   `add`.

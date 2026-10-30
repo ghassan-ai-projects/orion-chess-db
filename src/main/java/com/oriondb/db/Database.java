@@ -31,8 +31,13 @@ import java.util.function.Function;
  * reported) rather than dropped.
  *
  * <p>Reads go through immutable {@link Snapshot}s and never block. Changes are
- * made in {@link Batch}es that apply atomically; {@link #save()} writes the
- * file crash-safely. Each game carries a stable id in its {@code OrionId} tag.
+ * made in {@link Batch}es that apply atomically. {@link #save()} is
+ * incremental: it appends the changed games to a {@code .journal} write-ahead
+ * log (fsynced), so its cost is proportional to the change, not the database.
+ * The journal is folded into the PGN by {@link #compact()}, automatically when
+ * it grows large, and on {@link #close()} by default, so other programs see a
+ * current PGN once the application exits. Each game carries a stable id in its
+ * {@code OrionId} tag.
  */
 public final class Database implements AutoCloseable {
 
@@ -41,21 +46,33 @@ public final class Database implements AutoCloseable {
      * @param create    create the file if it does not exist
      * @param useCache  read and write the {@code .oidx} sidecar
      * @param autoSave  save after every committed batch
+     * @param compactOnClose fold the journal into the PGN when closing
      */
-    public record Options(boolean readOnly, boolean create, boolean useCache, boolean autoSave) {
-        public static final Options DEFAULT = new Options(false, true, true, false);
-        public static final Options READ_ONLY = new Options(true, false, true, false);
+    public record Options(boolean readOnly, boolean create, boolean useCache, boolean autoSave, boolean compactOnClose) {
+        public static final Options DEFAULT = new Options(false, true, true, false, true);
+        public static final Options READ_ONLY = new Options(true, false, true, false, false);
         /** Writable, but the file must already exist. */
-        public static final Options EXISTING = new Options(false, false, true, false);
+        public static final Options EXISTING = new Options(false, false, true, false, true);
+
+        public Options(boolean readOnly, boolean create, boolean useCache, boolean autoSave) {
+            this(readOnly, create, useCache, autoSave, !readOnly);
+        }
 
         public Options withAutoSave(boolean b) {
-            return new Options(readOnly, create, useCache, b);
+            return new Options(readOnly, create, useCache, b, compactOnClose);
         }
 
         public Options withReadOnly(boolean b) {
-            return new Options(b, b ? false : create, useCache, autoSave);
+            return new Options(b, b ? false : create, useCache, autoSave, !b && compactOnClose);
+        }
+
+        public Options withCompactOnClose(boolean b) {
+            return new Options(readOnly, create, useCache, autoSave, b);
         }
     }
+
+    /** Journal size that triggers compaction: max(this, a quarter of the PGN). */
+    private static final long COMPACT_MIN_BYTES = 8L << 20;
 
     private record State(List<GameRecord> records, Map<Integer, GameRecord> byId, int nextId,
                          Positions positions, long version, boolean dirty, Map<String, Object> derived) {
@@ -70,6 +87,9 @@ public final class Database implements AutoCloseable {
     private final Object writeLock = new Object();
     private volatile State state;
     private volatile boolean closed;
+    private Journal journal;                          // open for appending (writable databases), or null
+    private volatile boolean journalHasChanges;       // committed changes exist that the PGN lacks
+    private final java.util.Set<Integer> unsaved = new java.util.HashSet<>();  // ids changed since the last save
     private final java.util.List<DatabaseListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private static final System.Logger LOG = System.getLogger(Database.class.getName());
 
@@ -116,10 +136,34 @@ public final class Database implements AutoCloseable {
             byId.put(r.id, r);
             maxId = Math.max(maxId, r.id);
         }
-        state = new State(List.copyOf(records), byId, maxId + 1, Positions.build(records), 0, false);
         if (!fromCache && options.useCache() && !options.readOnly()) {
             IndexCache.write(storage.cacheFile(), storage.size(), storage.mtimeMillis(), records);
         }
+        // Replay saved-but-not-compacted changes on top of the PGN.
+        Journal.Replay replay = Journal.read(Journal.pathFor(storage.file()), storage.size(), storage.mtimeMillis());
+        int nextId = maxId + 1;
+        if (replay != null && !replay.entries().isEmpty()) {
+            java.util.LinkedHashMap<Integer, GameRecord> merged = new java.util.LinkedHashMap<>();
+            for (GameRecord r : records) merged.put(r.id, r);
+            for (Journal.Entry e : replay.entries()) {
+                if (e.text() == null) {
+                    merged.remove(e.id());
+                } else {
+                    byte[] bytes = e.text().getBytes(StandardCharsets.UTF_8);
+                    GameRecord r = Ingest.parse(new com.oriondb.pgn.RawGame(0, 0, bytes, 1)).record();
+                    merged.put(e.id(), r.withId(e.id(), new Source.Text(e.text())));
+                }
+            }
+            records = new ArrayList<>(merged.values());
+            byId = new HashMap<>(merged);
+            nextId = Math.max(nextId, replay.nextId());
+            for (GameRecord r : records) nextId = Math.max(nextId, r.id + 1);
+        }
+        journalHasChanges = replay != null && replay.commits() > 0;
+        if (replay != null && !options.readOnly()) {
+            journal = Journal.open(Journal.pathFor(storage.file()), storage.size(), storage.mtimeMillis(), replay.validLength());
+        }
+        state = new State(List.copyOf(records), byId, nextId, Positions.build(records), 0, false);
     }
 
     /** Parses the whole PGN file. Ids come from OrionId tags; missing or duplicate ones get fresh ids. */
@@ -217,6 +261,10 @@ public final class Database implements AutoCloseable {
                 List<GameRecord> records = List.copyOf(b.resultRecords());
                 Positions positions = s.positions.apply(b.removedIds(), b.addedRecords(), records);
                 state = new State(records, b.resultById(), b.nextId(), positions, s.version + 1, true);
+                change = b.change(s.version + 1);
+                unsaved.addAll(change.added());
+                unsaved.addAll(change.updated());
+                unsaved.addAll(change.deleted());
                 if (options.autoSave()) {
                     try {
                         saveLocked();
@@ -226,7 +274,6 @@ public final class Database implements AutoCloseable {
                     }
                     savedVersion = s.version + 1;
                 }
-                change = b.change(s.version + 1);
             }
         }
         Change committed = change;
@@ -289,9 +336,10 @@ public final class Database implements AutoCloseable {
     }
 
     /**
-     * Writes all changes to disk (temp file, fsync, atomic rename; the
-     * previous file is kept as {@code .bak}) and refreshes the index cache.
-     * Fails without writing if another program modified the file.
+     * Makes all committed changes durable. Appends the changed games to the
+     * journal (fsynced) when that is small; otherwise, or when the journal has
+     * grown past a quarter of the PGN (min 8 MB), compacts instead. Fails
+     * without writing if another program modified the PGN.
      */
     public void save() {
         long version;
@@ -303,28 +351,92 @@ public final class Database implements AutoCloseable {
         notify(l -> l.saved(version));
     }
 
-    /** Writes the current state; caller holds the write lock. */
-    private void saveLocked() {
-        {
-            State s = state;
-            if (!s.dirty) return;
-            if (storage == null) {
-                state = new State(s.records, s.byId, s.nextId, s.positions, s.version, false);
-                return;
-            }
-            List<Storage.GameBytes> out = new ArrayList<>(s.records.size());
-            for (GameRecord r : s.records) out.add(() -> bytesForSave(r));
-            List<long[]> spans = storage.save(out);
-            List<GameRecord> saved = new ArrayList<>(s.records.size());
-            Map<Integer, GameRecord> byId = new HashMap<>(s.records.size() * 2);
-            for (int i = 0; i < spans.size(); i++) {
-                GameRecord r = s.records.get(i).withSource(new Source.FileSpan(spans.get(i)[0], (int) spans.get(i)[1], false));
-                saved.add(r);
-                byId.put(r.id, r);
-            }
-            state = new State(List.copyOf(saved), byId, s.nextId, s.positions, s.version, false);
-            if (options.useCache()) IndexCache.write(storage.cacheFile(), storage.size(), storage.mtimeMillis(), saved);
+    /**
+     * Rewrites the PGN with every change folded in (temp file, fsync, previous
+     * generation kept as {@code .bak}, atomic rename), refreshes the index
+     * cache and removes the journal. Unchanged games are copied byte-for-byte.
+     */
+    public void compact() {
+        long version;
+        synchronized (writeLock) {
+            State s = requireOpen();
+            if (options.readOnly()) throw new DatabaseException("database is open read-only");
+            if (!s.dirty && !hasJournal()) return;
+            version = s.version;
+            compactLocked();
         }
+        notify(l -> l.saved(version));
+    }
+
+    /** True if saved changes live in the journal and are not yet in the PGN itself. */
+    public boolean hasJournal() {
+        return journalHasChanges;
+    }
+
+    /** Caller holds the write lock. */
+    private void saveLocked() {
+        State s = state;
+        if (!s.dirty) return;
+        if (storage == null) {
+            state = new State(s.records, s.byId, s.nextId, s.positions, s.version, false, s.derived);
+            unsaved.clear();
+            return;
+        }
+        if (options.readOnly()) throw new DatabaseException("database is open read-only");
+        List<Journal.Entry> entries = new ArrayList<>(unsaved.size());
+        long bytes = 0;
+        for (int id : new java.util.TreeSet<>(unsaved)) {
+            GameRecord r = s.byId.get(id);
+            String text = r == null ? null : textOf(r);
+            entries.add(new Journal.Entry(id, text));
+            bytes += text == null ? 13 : text.length() + 13;
+        }
+        long current = journal == null ? 0 : journal.size();
+        if (current + bytes > Math.max(COMPACT_MIN_BYTES, storage.size() / 4)) {
+            compactLocked();
+            return;
+        }
+        storage.checkUnchanged();
+        if (journal == null) {
+            journal = Journal.open(Journal.pathFor(storage.file()), storage.size(), storage.mtimeMillis(), 0);
+        }
+        journal.append(entries, s.nextId);
+        journalHasChanges = true;
+        unsaved.clear();
+        state = new State(s.records, s.byId, s.nextId, s.positions, s.version, false, s.derived);
+    }
+
+    /** Full rewrite of the PGN; caller holds the write lock. */
+    private void compactLocked() {
+        State s = state;
+        if (storage == null) {
+            saveLocked();
+            return;
+        }
+        List<Storage.GameBytes> out = new ArrayList<>(s.records.size());
+        for (GameRecord r : s.records) out.add(() -> bytesForSave(r));
+        List<long[]> spans = storage.save(out);
+        List<GameRecord> saved = new ArrayList<>(s.records.size());
+        Map<Integer, GameRecord> byId = new HashMap<>(s.records.size() * 2);
+        for (int i = 0; i < spans.size(); i++) {
+            GameRecord r = s.records.get(i).withSource(new Source.FileSpan(spans.get(i)[0], (int) spans.get(i)[1], false));
+            saved.add(r);
+            byId.put(r.id, r);
+        }
+        state = new State(List.copyOf(saved), byId, s.nextId, s.positions, s.version, false, s.derived);
+        unsaved.clear();
+        if (journal != null) {
+            journal.delete();
+            journal = null;
+        } else {
+            try {
+                Files.deleteIfExists(Journal.pathFor(storage.file()));
+            } catch (IOException e) {
+                throw new DatabaseException("cannot remove the journal: " + e.getMessage(), e);
+            }
+        }
+        journalHasChanges = false;
+        if (options.useCache()) IndexCache.write(storage.cacheFile(), storage.size(), storage.mtimeMillis(), saved);
     }
 
     private byte[] bytesForSave(GameRecord r) {
@@ -339,8 +451,10 @@ public final class Database implements AutoCloseable {
             if (closed) return;
             try {
                 if (options.autoSave() && state.dirty) save();
+                if (options.compactOnClose() && !options.readOnly() && hasJournal()) compactLocked();
             } finally {
                 closed = true;
+                if (journal != null) journal.close();
                 if (storage != null) storage.close();
             }
         }

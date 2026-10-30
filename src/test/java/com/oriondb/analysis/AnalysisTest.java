@@ -72,6 +72,8 @@ class AnalysisTest {
         assertTrue(PawnFeature.CARLSBAD.present(carlsbad, 0));
         Position passer = Position.fromFen("4k3/8/8/4P3/8/8/8/4K3 w - - 0 1");
         assertTrue(PawnFeature.PASSED_PAWN.present(passer, 0));
-        assertEquals(List.of("passed_pawn(white)"), PawnFeature.describe(PawnFeature.mask(passer)));
+        assertEquals(List.of("passed_pawn(white)", "isolated_pawn(white)"), PawnFeature.describe(PawnFeature.mask(passer)));
+        assertTrue(PawnFeature.ADVANCED_PASSED_PAWN.present(Position.fromFen("4k3/8/3P4/8/8/8/8/4K3 w - - 0 1"), 0));
+        assertFalse(PawnFeature.ADVANCED_PASSED_PAWN.present(passer, 0));
     }
 }

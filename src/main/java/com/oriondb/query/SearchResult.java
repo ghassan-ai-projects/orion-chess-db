@@ -7,10 +7,12 @@ import java.util.List;
 /**
  * One page of matches.
  *
- * @param total   number of matching games (before pagination)
- * @param matches the requested page
+ * @param total      number of matching games (before pagination)
+ * @param matches    the requested page
+ * @param version    snapshot version the search ran against
+ * @param nextCursor pass to {@link Query#after} for the next page; null on the last page
  */
-public record SearchResult(int total, List<Match> matches) {
+public record SearchResult(int total, List<Match> matches, long version, String nextCursor) {
     /**
      * A matching game. {@code ply} is where a position/pattern criterion first
      * matched on the mainline (half-moves from the start), {@link #NONE} when
