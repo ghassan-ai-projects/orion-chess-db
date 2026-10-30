@@ -1,5 +1,7 @@
 # OrionDB — a chess database engine
 
+> **Author:** [Ghassan Alhamoud](https://ghassan-alhamoud.com)
+
 OrionDB is a complete chess database engine for personal and club collections
 (up to roughly 100k–200k games on a laptop). It has the search depth of a
 commercial database, UCI engine analysis, a scriptable CLI, and a **built-in
